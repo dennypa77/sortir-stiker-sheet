@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Update mechanism runtime folders
+.update_staging/
+.update_pending/
+.update_backup/
+.update_logs/
+
+# Release build output
+dist/
+_test_updates/
+
+# User data
+Output/
+config.json
+
+# Excel lock files
+~$*.xlsx
+
+# Log dari run.vbs
+run.log
