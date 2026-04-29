@@ -32,6 +32,7 @@ PACKAGE_FILES = [
     "app.py",
     "file_processor.py",
     "sheets_sync.py",
+    "stock_reader.py",
     "updater.py",
     "version.py",
     "requirements.txt",
@@ -199,7 +200,7 @@ def main() -> None:
             VERSION_FILE.write_text(original, encoding="utf-8")
     else:
         write_version(new_version)
-        print(f"  version.py bumped: {current}  →  {new_version}")
+        print(f"  version.py bumped: {current}  ->  {new_version}")
         zip_path = build_zip(new_version, out_dir)
 
     size_kb = zip_path.stat().st_size / 1024

@@ -42,7 +42,7 @@ STAGING_DIR = ".update_staging"
 PENDING_DIR = ".update_pending"
 LOGS_DIR = ".update_logs"
 LOG_FILE = "update.log"
-REQUIRED_FILES = {"app.py", "file_processor.py", "sheets_sync.py", "version.py", "requirements.txt"}
+REQUIRED_FILES = {"app.py", "file_processor.py", "sheets_sync.py", "stock_reader.py", "version.py", "requirements.txt"}
 INTERNAL_MANIFEST_NAME = "_manifest.json"
 CHUNK_SIZE = 65536  # 64 KB
 

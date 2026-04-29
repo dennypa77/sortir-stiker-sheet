@@ -24,6 +24,7 @@ from datetime import date
 import openpyxl
 
 from sheets_sync import sync_orders
+from stock_reader import check_stock_availability, fetch_stock
 
 
 # ─── Konstanta ukuran ─────────────────────────────────────────────────────────
@@ -277,6 +278,13 @@ def process_orders(
         return {"total": 0, "berhasil": 0, "tidak_ditemukan": [], "berhasil_list": []}
 
     log("info", f"📦 Total pesanan: {len(pesanan_list)} baris")
+
+    # ── Cek stok di DATABASE_STIKER (warning saja, tidak memblokir) ─────────
+    try:
+        stock_map = fetch_stock(webhook_url, log_callback)
+        check_stock_availability(stock_map, pesanan_list, log_callback)
+    except Exception as e:
+        log("warning", f"⚠️  Cek stok gagal tak terduga: {e}")
 
     # ── Sync ke Google Sheet (sebelum copy, supaya log penjualan tetap masuk
     #    walau copy file gagal di tengah jalan) ──────────────────────────────
