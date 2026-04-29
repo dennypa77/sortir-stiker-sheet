@@ -19,5 +19,8 @@ config.json
 # Excel lock files
 ~$*.xlsx
 
+# Daily order data (user data, not source)
+pesanan_harian.xlsx
+
 # Log dari run.vbs
 run.log

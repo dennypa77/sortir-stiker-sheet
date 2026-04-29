@@ -11,7 +11,23 @@ rem (yang nunggu pythonw lama selesai saat restart) TIDAK sentuh .update_backup
 rem yang dibuat oleh NEW run.bat secara bersamaan.
 set APPLIED=0
 
-rem ── Apply pending update (kalau updater sudah stage versi baru) ──────
+rem ── Bootstrap virtual environment kalau belum ada ────────────────────
+rem (harus dulu sebelum preflight — preflight pakai Python)
+if not exist ".venv\Scripts\python.exe" (
+    echo [Setup] Membuat virtual environment...
+    python -m venv .venv
+    echo [Setup] Menginstal dependensi...
+    .venv\Scripts\pip install -r requirements.txt --quiet
+)
+
+rem ── Pre-flight update check ───────────────────────────────────────────
+rem Cek GitHub, download versi baru kalau ada, stage ke .update_pending/.
+rem preflight.py never raises, selalu exit 0.
+if exist ".venv\Scripts\python.exe" (
+    .venv\Scripts\python preflight.py
+)
+
+rem ── Apply pending update (kalau preflight / session sebelumnya stage) ──
 if exist ".update_pending\extracted\version.py" (
     set APPLIED=1
     echo [Update] Memasang versi baru...
@@ -27,7 +43,7 @@ if exist ".update_pending\extracted\version.py" (
     for %%F in (.update_pending\extracted\*.py) do copy /y "%%F" "%%~nxF" >nul
     if exist ".update_pending\extracted\requirements.txt" copy /y ".update_pending\extracted\requirements.txt" "requirements.txt" >nul
 
-    rem Simpan snapshot manifest untuk audit
+    rem Simpan snapshot manifest untuk audit + popup
     if exist ".update_pending\extracted\_manifest.json" copy /y ".update_pending\extracted\_manifest.json" ".update_backup\_manifest.json" >nul
 
     rem Bersihkan folder staging & pending
@@ -40,14 +56,6 @@ if exist ".update_pending\extracted\version.py" (
     )
 
     echo [Update] Selesai. Menjalankan aplikasi versi baru...
-)
-
-rem ── Bootstrap virtual environment kalau belum ada ────────────────────
-if not exist ".venv\Scripts\python.exe" (
-    echo [Setup] Membuat virtual environment...
-    python -m venv .venv
-    echo [Setup] Menginstal dependensi...
-    .venv\Scripts\pip install -r requirements.txt --quiet
 )
 
 rem ── Launch GUI (pythonw = tanpa console window) ──────────────────────

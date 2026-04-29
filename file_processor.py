@@ -6,13 +6,13 @@ Logika inti Aplikasi Sortir Stiker Pack:
   - Salin (duplikat) ke folder output
 
 Mode Normal  : flat copy ke output, nama file = RESI__SKU__001.ext
-Mode A3 Round: per-SKU subfolder di dalam output, berisi N file duplikat
+Mode A3 Round: 1 file per pesanan ke output, nama file diberi label kelipatan
+               yang harus diduplikat di CorelDRAW (4x untuk A5, 8x untuk A6).
                Struktur output:
                  output/
-                   SKU-001-VN-A6-B/
-                     SKU-001-VN-A6-B__001.ext
-                     SKU-001-VN-A6-B__002.ext
-                     ...
+                   RESI__SKU-001-VN-A6-B__8x.ext
+                   RESI__SKU-002-VN-A5-B__4x.ext
+                   ...
 """
 
 import math
@@ -176,32 +176,36 @@ def _copy_flat(
     return copied
 
 
-def _copy_to_subfolder(
+def _copy_with_multiplier(
     src_file: str,
+    resi_safe: str,
     sku_safe: str,
-    effective_qty: int,
+    multiplier: int,
     output_folder: str,
+    used_names: set[str],
     log_fn,
 ) -> int:
     """
-    Mode Pembulatan A3 — buat subfolder OUTPUT/SKU/ lalu salin N file ke dalamnya.
-    Nama file di dalam subfolder: SKU__001.ext, SKU__002.ext, ...
-    Return jumlah file yang berhasil disalin.
+    Mode Pembulatan A3 — salin 1 file ke root output_folder dengan label kelipatan.
+    Nama file: RESI__SKU__{N}x.ext  (operator duplikat N kali di CorelDRAW).
+    Return 1 jika berhasil, 0 jika gagal.
     """
     ext        = os.path.splitext(src_file)[1]
-    subfolder  = os.path.join(output_folder, sku_safe)
-    os.makedirs(subfolder, exist_ok=True)
+    base_name  = f"{resi_safe}__{sku_safe}__{multiplier}x{ext}"
+    final_name = base_name
+    collision  = 1
+    while final_name in used_names:
+        final_name = f"{resi_safe}__{sku_safe}__{multiplier}x_{collision}{ext}"
+        collision += 1
 
-    copied = 0
-    for copy_num in range(1, effective_qty + 1):
-        fname = f"{sku_safe}__{copy_num:03d}{ext}"
-        dst   = os.path.join(subfolder, fname)
-        try:
-            shutil.copy2(src_file, dst)
-            copied += 1
-        except Exception as e:
-            log_fn("error", f"❌ Gagal salin copy {copy_num} ke subfolder: {e}")
-    return copied
+    used_names.add(final_name)
+    dst = os.path.join(output_folder, final_name)
+    try:
+        shutil.copy2(src_file, dst)
+        return 1
+    except Exception as e:
+        log_fn("error", f"❌ Gagal salin file: {e}")
+        return 0
 
 
 # ─── Fungsi utama ─────────────────────────────────────────────────────────────
@@ -223,7 +227,7 @@ def process_orders(
       4. Cari & salin setiap file desain sesuai mode
 
     Mode Normal  → copy flat ke output (RESI__SKU__001.ext)
-    Mode A3 Round → buat subfolder per SKU, isi dengan N file duplikat
+    Mode A3 Round → 1 file per pesanan dengan label kelipatan (RESI__SKU__8x.ext)
 
     Return ringkasan dict.
     """
@@ -255,8 +259,8 @@ def process_orders(
     if mode == "a3_round":
         log("info",
             "⚙️  Mode: Pembulatan A3  "
-            "(A5 → kelipatan 4 | A6 → kelipatan 8)  "
-            "· Output per-subfolder SKU")
+            "(A5 → label 4x | A6 → label 8x)  "
+            "· 1 file per pesanan, duplikat di CorelDRAW")
     else:
         log("info", "⚙️  Mode: Normal  (jumlah copy = jumlah order)  · Output flat")
 
@@ -301,7 +305,7 @@ def process_orders(
     berhasil        = 0
     tidak_ditemukan = []
     berhasil_list   = []
-    used_names: set[str] = set()   # hanya dipakai di mode normal
+    used_names: set[str] = set()   # dipakai di mode normal & a3_round (anti-collision nama file)
 
     for idx, pesanan in enumerate(pesanan_list, start=1):
         resi = pesanan["resi"]
@@ -345,8 +349,9 @@ def process_orders(
 
         # ── Salin file ───────────────────────────────────────────────────────
         if mode == "a3_round":
-            copied_count = _copy_to_subfolder(
-                src_file, sku_safe, effective_qty, output_folder, log
+            copied_count = _copy_with_multiplier(
+                src_file, resi_safe, sku_safe, effective_qty,
+                output_folder, used_names, log
             )
         else:
             copied_count = _copy_flat(
@@ -361,13 +366,14 @@ def process_orders(
                 "sku":        sku,
                 "qty_order":  qty,
                 "qty_copied": copied_count,
+                "multiplier": effective_qty if mode == "a3_round" else None,
                 "src":        src_file,
             })
 
             extra = f" (dibulatkan dari {qty})" if effective_qty != qty else ""
             if mode == "a3_round":
                 log("success",
-                    f"✅ {copied_count} file{extra}  →  📁 {sku_safe}/  "
+                    f"✅ Label {effective_qty}x{extra} | Resi: {resi} | SKU: {sku}  "
                     f"← {os.path.basename(src_file)}")
             else:
                 label = f"{copied_count}x" if copied_count > 1 else "1x"

@@ -69,8 +69,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"Sortir Stiker Pack — v{__version__}")
-        self.geometry("860x740")
-        self.minsize(720, 620)
+        self.geometry("900x780")
+        self.minsize(760, 640)
         self.configure(bg=BG_DARK)
         self.resizable(True, True)
 
@@ -86,6 +86,7 @@ class App(tk.Tk):
         self._active_orchestrator = None
         self._restart_cancelled   = False
         self._banner_state        = "hidden"
+        self._pending_sortir_args = None  # (src, excel, output, mode, webhook) — diisi saat klik Start, dipakai setelah cek update selesai
 
         self._build_ui()
         self._load_saved_paths()
@@ -94,8 +95,7 @@ class App(tk.Tk):
         # Kalau baru saja di-update, tampilkan popup konfirmasi (tampil setelah UI paint)
         self.after(500, self._check_post_update_notification)
 
-        # Auto-update: cek ke GitHub setiap launch (3s delay supaya UI paint dulu)
-        self.after(3000, self._start_update_check)
+        # Manual force-check via shortcut (auto-check sekarang dipicu oleh klik Start)
         self.bind("<Control-Shift-U>", lambda _e: self._start_update_check(force=True))
 
     # ── Center window ─────────────────────────────────────────────────────────
@@ -145,9 +145,70 @@ class App(tk.Tk):
         sep = tk.Frame(self, bg=BORDER_COLOR, height=1)
         sep.pack(fill="x", padx=20)
 
-        # ── Panel path ────────────────────────────────────────────────────────
-        path_panel = tk.Frame(self, bg=BG_PANEL, padx=22, pady=16)
-        path_panel.pack(fill="x", padx=20, pady=(12, 0))
+        # ── Style global (clam + progressbar + notebook) ──────────────────────
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure(
+            "Stiker.Horizontal.TProgressbar",
+            troughcolor = BG_INPUT,
+            background  = ACCENT,
+            thickness   = 12,
+            borderwidth = 0,
+        )
+        style.configure(
+            "Stiker.TNotebook",
+            background  = BG_DARK,
+            borderwidth = 0,
+            tabmargins  = [0, 0, 0, 0],
+        )
+        style.configure(
+            "Stiker.TNotebook.Tab",
+            background  = BG_PANEL,
+            foreground  = TEXT_SECONDARY,
+            padding     = [22, 9],
+            font        = ("Segoe UI", 9, "bold"),
+            borderwidth = 0,
+        )
+        style.map(
+            "Stiker.TNotebook.Tab",
+            background = [("selected", BG_CARD), ("active", BTN_SEC_HOVER)],
+            foreground = [("selected", TEXT_PRIMARY), ("active", TEXT_PRIMARY)],
+        )
+
+        self.progress_var = tk.DoubleVar(value=0)
+
+        # ── Footer (pack dulu di bawah, supaya banner bisa pack `before=`) ────
+        self.footer_frame = tk.Frame(self, bg=BG_DARK, pady=6)
+        self.footer_frame.pack(fill="x", side="bottom")
+        tk.Label(
+            self.footer_frame,
+            text="Sortir Stiker Pack  ·  Mode Normal & Pembulatan A3",
+            font=("Segoe UI", 7),
+            fg=MUTED_COLOR, bg=BG_DARK,
+        ).pack()
+
+        # ── Notebook (Konfigurasi  /  Eksekusi) ───────────────────────────────
+        self.notebook = ttk.Notebook(self, style="Stiker.TNotebook")
+        self.notebook.pack(fill="both", expand=True, padx=20, pady=(14, 6))
+
+        tab_config = tk.Frame(self.notebook, bg=BG_DARK)
+        self.notebook.add(tab_config, text="  ⚙  Konfigurasi  ")
+        self._build_config_tab(tab_config)
+
+        tab_exec = tk.Frame(self.notebook, bg=BG_DARK)
+        self.notebook.add(tab_exec, text="  ▶  Eksekusi  ")
+        self._build_exec_tab(tab_exec)
+
+        # Default ke tab Eksekusi (yang dipakai sehari-hari)
+        self.notebook.select(tab_exec)
+
+        # Update banner (hidden by default — muncul saat ada update berjalan)
+        self._build_update_banner()
+
+    # ── Tab: Konfigurasi ──────────────────────────────────────────────────────
+    def _build_config_tab(self, parent):
+        path_panel = tk.Frame(parent, bg=BG_PANEL, padx=22, pady=18)
+        path_panel.pack(fill="x", padx=4, pady=(12, 0))
 
         tk.Label(
             path_panel,
@@ -168,8 +229,17 @@ class App(tk.Tk):
                             self.webhook_url)
         path_panel.columnconfigure(0, weight=1)
 
-        # ── Panel mode output ─────────────────────────────────────────────────
-        mode_outer = tk.Frame(self, bg=BG_DARK, padx=20, pady=12)
+        tk.Label(
+            parent,
+            text="ℹ  Pengaturan disimpan otomatis. Pindah ke tab Eksekusi untuk menjalankan.",
+            font=("Segoe UI", 8),
+            fg=MUTED_COLOR, bg=BG_DARK,
+        ).pack(pady=(14, 0))
+
+    # ── Tab: Eksekusi ─────────────────────────────────────────────────────────
+    def _build_exec_tab(self, parent):
+        # Mode output
+        mode_outer = tk.Frame(parent, bg=BG_DARK, pady=10)
         mode_outer.pack(fill="x")
 
         tk.Label(
@@ -204,28 +274,18 @@ class App(tk.Tk):
             value    = "a3_round",
             icon     = "2️⃣",
             title    = "Mode Pembulatan A3",
-            subtitle = "Otomatis bulatkan ke muatan A3",
-            desc     = "A5  →  kelipatan 4  |  A6  →  kelipatan 8\n"
-                        "Contoh: A5 order 1 → 4 | A6 order 5 → 8",
+            subtitle = "1 file dengan label kelipatan",
+            desc     = "A5 → label 4x  |  A6 → label 8x\n"
+                        "Cukup duplikat di CorelDRAW sesuai label.",
             bg_normal = MODE_A3_BG,
             bg_sel    = MODE_A3_SEL,
             accent    = "#6c63ff",
         )
 
-        # ── Progress ──────────────────────────────────────────────────────────
-        prog_frame = tk.Frame(self, bg=BG_DARK, padx=20)
-        prog_frame.pack(fill="x", pady=(0, 4))
+        # Progress
+        prog_frame = tk.Frame(parent, bg=BG_DARK)
+        prog_frame.pack(fill="x", pady=(8, 0))
 
-        self.progress_var = tk.DoubleVar(value=0)
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure(
-            "Stiker.Horizontal.TProgressbar",
-            troughcolor = BG_INPUT,
-            background  = ACCENT,
-            thickness   = 12,
-            borderwidth = 0,
-        )
         self.progressbar = ttk.Progressbar(
             prog_frame,
             variable = self.progress_var,
@@ -243,8 +303,8 @@ class App(tk.Tk):
         )
         self.progress_label.pack(fill="x")
 
-        # ── Tombol mulai ──────────────────────────────────────────────────────
-        btn_frame = tk.Frame(self, bg=BG_DARK, pady=8)
+        # Tombol mulai
+        btn_frame = tk.Frame(parent, bg=BG_DARK, pady=8)
         btn_frame.pack()
 
         self.btn_start = tk.Button(
@@ -260,12 +320,12 @@ class App(tk.Tk):
         self.btn_start.pack()
         self._bind_hover(self.btn_start, ACCENT, ACCENT_HOVER)
 
-        # ── Area log ──────────────────────────────────────────────────────────
-        log_outer = tk.Frame(self, bg=BG_DARK, padx=20, pady=4)
+        # Area log — sekarang dapat tinggi penuh dari tab
+        log_outer = tk.Frame(parent, bg=BG_DARK, pady=6)
         log_outer.pack(fill="both", expand=True)
 
         log_header = tk.Frame(log_outer, bg=BG_DARK)
-        log_header.pack(fill="x", pady=(0, 5))
+        log_header.pack(fill="x", pady=(0, 6))
 
         tk.Label(
             log_header,
@@ -277,7 +337,7 @@ class App(tk.Tk):
         self.stat_label = tk.Label(
             log_header,
             text="",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             fg=INFO_COLOR, bg=BG_DARK,
         )
         self.stat_label.pack(side="left", padx=14)
@@ -289,7 +349,7 @@ class App(tk.Tk):
             bg=BTN_SECONDARY, fg=TEXT_SECONDARY,
             activebackground=BTN_SEC_HOVER, activeforeground=TEXT_PRIMARY,
             relief="flat", cursor="hand2",
-            padx=8, pady=2,
+            padx=10, pady=3,
             command=self._clear_log,
         )
         btn_clear.pack(side="right")
@@ -301,17 +361,19 @@ class App(tk.Tk):
 
         self.log_text = tk.Text(
             log_box,
-            font=("Consolas", 9),
+            font=("Consolas", 11),
             bg=BG_INPUT, fg=TEXT_PRIMARY,
             relief="flat",
-            padx=12, pady=8,
+            padx=14, pady=10,
             state="disabled",
             wrap="word",
             cursor="arrow",
+            spacing1=2,
+            spacing3=2,
         )
         scrollbar = tk.Scrollbar(
             log_box, command=self.log_text.yview,
-            bg=BG_PANEL, troughcolor=BG_INPUT, width=10,
+            bg=BG_PANEL, troughcolor=BG_INPUT, width=12,
         )
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
@@ -323,19 +385,6 @@ class App(tk.Tk):
         self.log_text.tag_configure("error",   foreground=ERROR_COLOR)
         self.log_text.tag_configure("warning", foreground=WARNING_COLOR)
         self.log_text.tag_configure("info",    foreground=INFO_COLOR)
-
-        # Footer
-        self.footer_frame = tk.Frame(self, bg=BG_DARK, pady=6)
-        self.footer_frame.pack(fill="x", side="bottom")
-        tk.Label(
-            self.footer_frame,
-            text="Sortir Stiker Pack  ·  Mode Normal & Pembulatan A3",
-            font=("Segoe UI", 7),
-            fg=MUTED_COLOR, bg=BG_DARK,
-        ).pack()
-
-        # Update banner (hidden by default — muncul saat ada update berjalan)
-        self._build_update_banner()
 
     # ── Mode card (radio button bergaya) ──────────────────────────────────────
     def _build_mode_card(self, parent, col, value, icon, title, subtitle, desc,
@@ -606,11 +655,59 @@ class App(tk.Tk):
         webhook = self.webhook_url.get().strip()
 
         self._processing = True
-        self.btn_start.config(text="⏳  Memproses…", state="disabled")
         self.stat_label.config(text="")
         self._clear_log()
         self.progress_var.set(0)
         self.progress_label.config(text="")
+
+        # Simpan args untuk dipakai setelah cek update selesai
+        self._pending_sortir_args = (src, excel, output, mode, webhook)
+
+        # Cek update dulu — kalau ada update, restart cycle akan jalan
+        # dan _proceed_with_sortir tidak dipanggil. Kalau up-to-date, lanjut sortir.
+        self.btn_start.config(text="🔄  Memeriksa update…", state="disabled")
+        self._log("info", "🔄  Memeriksa pembaruan dari GitHub sebelum mulai...")
+        self._start_update_check(force=True, done_callback=self._after_update_check_for_sortir)
+
+    def _after_update_check_for_sortir(self, was_cancelled: bool):
+        """
+        Dipanggil di UI thread setelah UpdateOrchestrator selesai (dipicu dari klik Start).
+        - Kalau .update_pending/ ada → restart cycle in-progress, biarkan jalan.
+        - Kalau user batalin download → reset tombol, jangan sortir.
+        - Lainnya → lanjut sortir dengan args yang disimpan.
+        """
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        pending_dir  = os.path.join(project_root, ".update_pending")
+
+        if os.path.exists(pending_dir):
+            # Update sudah di-stage. _schedule_restart sudah dipanggil sebelum
+            # callback ini, jadi countdown berjalan. Tombol stay disabled.
+            self._log("info", "ℹ️  Update siap — aplikasi akan restart untuk memasang versi baru.")
+            return
+
+        if was_cancelled:
+            self._processing = False
+            self._pending_sortir_args = None
+            self.btn_start.config(text="▶   MULAI SORTIR", state="normal")
+            self._log("warning", "⚠️  Sortir dibatalkan karena pengecekan update di-cancel.")
+            return
+
+        # Up-to-date / offline / GitHub belum dikonfigurasi → lanjut sortir
+        self._proceed_with_sortir()
+
+    def _proceed_with_sortir(self):
+        """Kick off thread sortir setelah cek update kelar tanpa update."""
+        if self._pending_sortir_args is None:
+            # State inconsistent — reset
+            self._processing = False
+            self.btn_start.config(text="▶   MULAI SORTIR", state="normal")
+            return
+
+        src, excel, output, mode, webhook = self._pending_sortir_args
+        self._pending_sortir_args = None
+
+        self.btn_start.config(text="⏳  Memproses…", state="disabled")
+        self._log("info", "▶️  Memulai proses sortir...")
 
         thread = threading.Thread(
             target=self._run_process,
@@ -806,10 +903,20 @@ class App(tk.Tk):
         self._log("info", "ℹ️  Update ditunda — akan dipasang saat aplikasi dibuka lagi.")
 
     # ── Update check entry point ──────────────────────────────────────────────
-    def _start_update_check(self, force: bool = False):
-        """Spawn background thread yang jalankan UpdateOrchestrator."""
+    def _start_update_check(self, force: bool = False, done_callback=None):
+        """
+        Spawn background thread yang jalankan UpdateOrchestrator.
+
+        done_callback: optional fn(was_cancelled: bool) — dipanggil di UI thread
+        setelah orch.run() selesai. Dipakai oleh tombol Start untuk lanjut sortir
+        kalau tidak ada update.
+        """
         if self._active_orchestrator is not None:
-            return  # sudah ada cek yang jalan
+            # Sudah ada cek yang jalan — kalau pemanggil pasang callback,
+            # informasikan bahwa cek tidak dilakukan oleh kita (treat as not-cancelled).
+            if done_callback is not None:
+                self.after(0, done_callback, False)
+            return
 
         project_root = os.path.dirname(os.path.abspath(__file__))
         orch = UpdateOrchestrator(
@@ -825,10 +932,14 @@ class App(tk.Tk):
         self._active_orchestrator = orch
 
         def _runner():
+            cancelled = False
             try:
                 orch.run()
+                cancelled = orch.cancel_event.is_set()
             finally:
                 self.after(0, self._clear_active_orchestrator)
+                if done_callback is not None:
+                    self.after(0, done_callback, cancelled)
 
         threading.Thread(target=_runner, daemon=True).start()
 
