@@ -110,41 +110,6 @@ class App(tk.Tk):
 
     # ── Build UI ───────────────────────────────────────────────────────────────
     def _build_ui(self):
-        # ── Header ────────────────────────────────────────────────────────────
-        header = tk.Frame(self, bg=BG_DARK, pady=20)
-        header.pack(fill="x")
-
-        # Logo & title
-        title_frame = tk.Frame(header, bg=BG_DARK)
-        title_frame.pack()
-
-        tk.Label(
-            title_frame,
-            text="🎨",
-            font=("Segoe UI Emoji", 26),
-            bg=BG_DARK,
-        ).pack(side="left", padx=(0, 10))
-
-        text_frame = tk.Frame(title_frame, bg=BG_DARK)
-        text_frame.pack(side="left")
-
-        tk.Label(
-            text_frame,
-            text="Sortir Stiker Pack",
-            font=("Segoe UI", 20, "bold"),
-            fg=TEXT_PRIMARY, bg=BG_DARK,
-        ).pack(anchor="w")
-        tk.Label(
-            text_frame,
-            text="Baca Excel  →  Cari Desain  →  Salin ke Output",
-            font=("Segoe UI", 9),
-            fg=MUTED_COLOR, bg=BG_DARK,
-        ).pack(anchor="w")
-
-        # Separator
-        sep = tk.Frame(self, bg=BORDER_COLOR, height=1)
-        sep.pack(fill="x", padx=20)
-
         # ── Style global (clam + progressbar + notebook) ──────────────────────
         style = ttk.Style(self)
         style.theme_use("clam")
@@ -303,22 +268,35 @@ class App(tk.Tk):
         )
         self.progress_label.pack(fill="x")
 
-        # Tombol mulai
-        btn_frame = tk.Frame(parent, bg=BG_DARK, pady=8)
+        # Tombol mulai + shortcut Folder Output
+        btn_frame = tk.Frame(parent, bg=BG_DARK, pady=6)
         btn_frame.pack()
 
         self.btn_start = tk.Button(
             btn_frame,
-            text="▶   MULAI SORTIR",
-            font=("Segoe UI", 13, "bold"),
+            text="▶  Mulai Sortir",
+            font=("Segoe UI", 10, "bold"),
             bg=ACCENT, fg="white",
             activebackground=ACCENT_HOVER, activeforeground="white",
             relief="flat", cursor="hand2",
-            padx=48, pady=11,
+            padx=22, pady=6,
             command=self._start_process,
         )
-        self.btn_start.pack()
+        self.btn_start.pack(side="left")
         self._bind_hover(self.btn_start, ACCENT, ACCENT_HOVER)
+
+        self.btn_open_output = tk.Button(
+            btn_frame,
+            text="📂  Folder Output",
+            font=("Segoe UI", 9),
+            bg=BTN_SECONDARY, fg=TEXT_PRIMARY,
+            activebackground=BTN_SEC_HOVER, activeforeground=TEXT_PRIMARY,
+            relief="flat", cursor="hand2",
+            padx=14, pady=6,
+            command=self._open_output_folder,
+        )
+        self.btn_open_output.pack(side="left", padx=(8, 0))
+        self._bind_hover(self.btn_open_output, BTN_SECONDARY, BTN_SEC_HOVER)
 
         # Area log — sub-notebook dengan dua tab: Log Proses + Log Gudang
         log_outer = tk.Frame(parent, bg=BG_DARK, pady=6)
@@ -390,7 +368,8 @@ class App(tk.Tk):
         scrollbar.pack(side="right", fill="y")
         text.pack(side="left", fill="both", expand=True)
 
-        text.tag_configure("success", foreground=SUCCESS_COLOR)
+        text.tag_configure("success", foreground=SUCCESS_COLOR)   # hijau — dari gudang
+        text.tag_configure("printed", foreground=TEXT_PRIMARY)    # putih — file dicetak
         text.tag_configure("error",   foreground=ERROR_COLOR)
         text.tag_configure("warning", foreground=WARNING_COLOR)
         text.tag_configure("info",    foreground=INFO_COLOR)
@@ -604,6 +583,31 @@ class App(tk.Tk):
         if path:
             self.output_folder.set(path)
             self._save_paths()
+
+    # ── Shortcut buka folder output di File Explorer ─────────────────────────
+    def _open_output_folder(self):
+        output = self.output_folder.get().strip()
+        if not output:
+            messagebox.showwarning(
+                "Folder Output Belum Diset",
+                "Belum ada folder output. Set dulu di tab ⚙ Konfigurasi."
+            )
+            return
+        if not os.path.isdir(output):
+            if not messagebox.askyesno(
+                "Folder Belum Ada",
+                f"Folder belum ada:\n\n{output}\n\nBuat sekarang?"
+            ):
+                return
+            try:
+                os.makedirs(output, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("Gagal Membuat Folder", str(e))
+                return
+        try:
+            os.startfile(output)
+        except Exception as e:
+            messagebox.showerror("Gagal Membuka Folder", str(e))
 
     # ── Log helpers ───────────────────────────────────────────────────────────
     def _log(self, level: str, message: str):

@@ -472,14 +472,16 @@ def process_orders(
 
             stock_note = f" (+{from_stock} dari gudang)" if from_stock > 0 else ""
             extra = f" (dibulatkan dari {to_print})" if effective_qty != to_print else ""
+            # "printed" = putih (harus diproduksi); "success" hijau dipakai khusus
+            # untuk pesanan yang fully diambil dari gudang (lihat blok di atas).
             if mode == "a3_round":
-                log("success",
-                    f"✅ Label {effective_qty}x{extra}{stock_note} | Resi: {resi} | SKU: {sku}  "
+                log("printed",
+                    f"🖨️ Label {effective_qty}x{extra}{stock_note} | Resi: {resi} | SKU: {sku}  "
                     f"← {os.path.basename(src_file)}")
             else:
                 label = f"{copied_count}x" if copied_count > 1 else "1x"
-                log("success",
-                    f"✅ {label}{extra}{stock_note} | Resi: {resi} | SKU: {sku}  "
+                log("printed",
+                    f"🖨️ {label}{extra}{stock_note} | Resi: {resi} | SKU: {sku}  "
                     f"← {os.path.basename(src_file)}")
 
     # ── 5. Ringkasan ─────────────────────────────────────────────────────────
