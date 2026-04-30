@@ -320,19 +320,12 @@ class App(tk.Tk):
         self.btn_start.pack()
         self._bind_hover(self.btn_start, ACCENT, ACCENT_HOVER)
 
-        # Area log — sekarang dapat tinggi penuh dari tab
+        # Area log — sub-notebook dengan dua tab: Log Proses + Log Gudang
         log_outer = tk.Frame(parent, bg=BG_DARK, pady=6)
         log_outer.pack(fill="both", expand=True)
 
         log_header = tk.Frame(log_outer, bg=BG_DARK)
         log_header.pack(fill="x", pady=(0, 6))
-
-        tk.Label(
-            log_header,
-            text="LOG PROSES",
-            font=("Segoe UI", 8, "bold"),
-            fg=MUTED_COLOR, bg=BG_DARK,
-        ).pack(side="left")
 
         self.stat_label = tk.Label(
             log_header,
@@ -340,7 +333,7 @@ class App(tk.Tk):
             font=("Segoe UI", 9),
             fg=INFO_COLOR, bg=BG_DARK,
         )
-        self.stat_label.pack(side="left", padx=14)
+        self.stat_label.pack(side="left")
 
         btn_clear = tk.Button(
             log_header,
@@ -355,11 +348,28 @@ class App(tk.Tk):
         btn_clear.pack(side="right")
         self._bind_hover(btn_clear, BTN_SECONDARY, BTN_SEC_HOVER)
 
-        log_box = tk.Frame(log_outer, bg=BG_INPUT, relief="flat",
+        log_notebook = ttk.Notebook(log_outer, style="Stiker.TNotebook")
+        log_notebook.pack(fill="both", expand=True)
+        self.log_notebook = log_notebook
+
+        # Tab 1: Log Proses (default, semua log selama eksekusi)
+        tab_proses = tk.Frame(log_notebook, bg=BG_DARK)
+        log_notebook.add(tab_proses, text="  📋  Log Proses  ")
+        self.log_text = self._build_log_pane(tab_proses)
+
+        # Tab 2: Log Gudang (terisi setelah proses selesai —
+        # khusus SKU yang diambil dari gudang)
+        tab_gudang = tk.Frame(log_notebook, bg=BG_DARK)
+        log_notebook.add(tab_gudang, text="  🏪  Log Gudang  ")
+        self.log_gudang_text = self._build_log_pane(tab_gudang)
+
+    def _build_log_pane(self, parent) -> tk.Text:
+        """Bikin satu kotak log (Text + Scrollbar) yang siap di-tag-warna."""
+        log_box = tk.Frame(parent, bg=BG_INPUT, relief="flat",
                            highlightbackground=BORDER_COLOR, highlightthickness=1)
         log_box.pack(fill="both", expand=True)
 
-        self.log_text = tk.Text(
+        text = tk.Text(
             log_box,
             font=("Consolas", 11),
             bg=BG_INPUT, fg=TEXT_PRIMARY,
@@ -372,19 +382,20 @@ class App(tk.Tk):
             spacing3=2,
         )
         scrollbar = tk.Scrollbar(
-            log_box, command=self.log_text.yview,
+            log_box, command=text.yview,
             bg=BG_PANEL, troughcolor=BG_INPUT, width=12,
         )
-        self.log_text.configure(yscrollcommand=scrollbar.set)
+        text.configure(yscrollcommand=scrollbar.set)
 
         scrollbar.pack(side="right", fill="y")
-        self.log_text.pack(side="left", fill="both", expand=True)
+        text.pack(side="left", fill="both", expand=True)
 
-        # Tag warna
-        self.log_text.tag_configure("success", foreground=SUCCESS_COLOR)
-        self.log_text.tag_configure("error",   foreground=ERROR_COLOR)
-        self.log_text.tag_configure("warning", foreground=WARNING_COLOR)
-        self.log_text.tag_configure("info",    foreground=INFO_COLOR)
+        text.tag_configure("success", foreground=SUCCESS_COLOR)
+        text.tag_configure("error",   foreground=ERROR_COLOR)
+        text.tag_configure("warning", foreground=WARNING_COLOR)
+        text.tag_configure("info",    foreground=INFO_COLOR)
+        text.tag_configure("muted",   foreground=MUTED_COLOR)
+        return text
 
     # ── Mode card (radio button bergaya) ──────────────────────────────────────
     def _build_mode_card(self, parent, col, value, icon, title, subtitle, desc,
@@ -605,10 +616,17 @@ class App(tk.Tk):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def _append_log_gudang(self, level: str, message: str):
+        self.log_gudang_text.configure(state="normal")
+        self.log_gudang_text.insert("end", message + "\n", level)
+        self.log_gudang_text.see("end")
+        self.log_gudang_text.configure(state="disabled")
+
     def _clear_log(self):
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
+        for txt in (self.log_text, self.log_gudang_text):
+            txt.configure(state="normal")
+            txt.delete("1.0", "end")
+            txt.configure(state="disabled")
         self.stat_label.config(text="")
 
     # ── Progress ──────────────────────────────────────────────────────────────
@@ -741,10 +759,56 @@ class App(tk.Tk):
         total  = result.get("total", 0)
         ok     = result.get("berhasil", 0)
         errors = len(result.get("tidak_ditemukan", []))
+        gudang = result.get("dari_gudang", 0)
         if total > 0:
-            self.stat_label.config(
-                text=f"✅ {ok} berhasil  |  ❌ {errors} tidak ditemukan  |  {total} total"
-            )
+            stat = f"✅ {ok} berhasil  |  📦 {gudang} dari gudang  |  ❌ {errors} tidak ditemukan  |  {total} total"
+            self.stat_label.config(text=stat)
+
+        self._populate_log_gudang(result)
+
+    def _populate_log_gudang(self, result: dict):
+        """
+        Isi tab Log Gudang dari hasil proses sortir.
+        Hanya entri yang from_stock > 0 (ada qty diambil dari DATABASE_STIKER).
+        """
+        # Bersihkan dulu sebelum re-populate (proses kedua tidak boleh nimpa list lama)
+        self.log_gudang_text.configure(state="normal")
+        self.log_gudang_text.delete("1.0", "end")
+        self.log_gudang_text.configure(state="disabled")
+
+        items = [b for b in result.get("berhasil_list", [])
+                 if (b.get("from_stock") or 0) > 0]
+
+        if not items:
+            self._append_log_gudang("muted",
+                "Tidak ada SKU yang diambil dari gudang pada proses ini.\n"
+                "(Semua pesanan dicetak ulang atau stok kosong.)")
+            return
+
+        total_taken = sum(b["from_stock"] for b in items)
+        header = (
+            f"📦  {len(items)} pesanan diambil dari gudang  |  "
+            f"total {total_taken} pcs\n"
+            f"{'─' * 70}"
+        )
+        self._append_log_gudang("info", header)
+
+        for b in items:
+            resi   = b.get("resi", "")
+            sku    = b.get("sku", "")
+            qty    = b.get("qty_order", 0)
+            taken  = b.get("from_stock", 0)
+            copied = b.get("qty_copied", 0)
+
+            if copied == 0:
+                # Fully terlayani gudang — tidak ada copy
+                line = f"✅ [{resi}]  {sku}  →  ambil {taken} dari gudang  (file desain tidak diduplikasi)"
+                self._append_log_gudang("success", line)
+            else:
+                # Sebagian gudang, sebagian dicetak
+                line = (f"✅ [{resi}]  {sku}  →  ambil {taken} dari gudang  "
+                        f"+ cetak ulang {copied} (qty order {qty})")
+                self._append_log_gudang("success", line)
 
     # ── Post-update notification ──────────────────────────────────────────────
     def _check_post_update_notification(self):
