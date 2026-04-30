@@ -13,11 +13,35 @@ set APPLIED=0
 
 rem ── Bootstrap virtual environment kalau belum ada ────────────────────
 rem (harus dulu sebelum preflight — preflight pakai Python)
-if not exist ".venv\Scripts\python.exe" (
-    echo [Setup] Membuat virtual environment...
+rem
+rem Cek juga apakah .venv yang ada masih VALID. Kalau project di-copy dari
+rem komputer lain, .venv\Scripts\pythonw.exe cuma shim yang nunjuk ke path
+rem absolut Python di komputer asal — jadi rusak di komputer baru.
+rem Test: jalanin python.exe --version, kalau gagal berarti venv rusak.
+set VENV_OK=0
+if exist ".venv\Scripts\python.exe" (
+    .venv\Scripts\python.exe --version >nul 2>&1
+    if not errorlevel 1 set VENV_OK=1
+)
+
+if "%VENV_OK%"=="0" (
+    if exist ".venv" (
+        echo [Setup] Virtual environment rusak ^(mungkin dari komputer lain^), membangun ulang...
+        rmdir /s /q ".venv"
+    ) else (
+        echo [Setup] Membuat virtual environment...
+    )
+    where python >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] Python tidak ditemukan di PATH.
+        echo Silakan install Python 3.10+ dari https://www.python.org/downloads/
+        echo Lalu jalankan install.bat terlebih dahulu.
+        if not defined HIDDEN pause
+        exit /b 1
+    )
     python -m venv .venv
     echo [Setup] Menginstal dependensi...
-    .venv\Scripts\pip install -r requirements.txt --quiet
+    .venv\Scripts\pip install -r requirements.txt --quiet --disable-pip-version-check
 )
 
 rem ── Pre-flight update check ───────────────────────────────────────────
