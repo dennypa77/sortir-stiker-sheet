@@ -1,12 +1,12 @@
 """
 stock_reader.py
-Baca data stok dari Google Sheet DATABASE_STIKER lewat Apps Script doGet.
+Baca + potong stok dari Google Sheet DATABASE_STIKER lewat Apps Script.
 
-Endpoint Apps Script (apps_script.gs::doGet) balikin:
-    {"status": "ok", "stock": {"SKU1": 10, "SKU2": 5, ...}, "count": 42}
-
-Aplikasi pakai data ini untuk peringatan kalau stok kurang sebelum sortir
-diproses. Tidak memblokir — hanya log warning supaya operator sadar.
+Endpoint Apps Script:
+  GET   doGet                       → {"status":"ok","stock":{SKU:qty,...}}
+  POST  action="consume_stock"      → potong stok kolom G + tulis LOG_KELUAR
+                                       balas {"status":"ok",
+                                              "consumed":[{sku,ok,taken,sisa},...]}
 
 Tidak boleh import UI — komunikasi balik ke layer atas via log_callback
 dengan kontrak yang sama dipakai file_processor.py:
@@ -145,3 +145,76 @@ def check_stock_availability(
 
     if not not_in_db and not insufficient:
         log("success", "✅ Semua SKU pesanan tersedia di stok DATABASE_STIKER.")
+
+
+def consume_stock(
+    webhook_url: str,
+    items: list[dict],
+    log_callback=None,
+) -> list[dict] | None:
+    """
+    POST batch konsumsi stok ke Apps Script. Server akan:
+      - Potong qty dari kolom G di DATABASE_STIKER per item.
+      - Append (SKU, qty, ket) ke kolom B/C/D di tab LOG_KELUAR.
+        Kolom A (Tanggal) dibiarkan kosong — diisi otomatis oleh formula sheet.
+
+    Args:
+        webhook_url : URL Apps Script Web App (sama dgn endpoint sync).
+        items       : list of {"sku": str, "qty": int, "ket": str}.
+        log_callback: fn(level, msg) untuk lapor balik ke UI.
+
+    Return:
+        list per-item result [{"sku","ok","taken","sisa","message"?}, ...]
+        urutan sama dgn `items`. Length sama dgn input.
+        None kalau call gagal total (network/HTTP/parse) — caller harus
+        fallback ke "print semua" demi keamanan customer.
+    """
+    def log(level, msg):
+        if log_callback:
+            log_callback(level, msg)
+
+    if not webhook_url or not webhook_url.strip():
+        return None
+    if not items:
+        return []
+
+    payload = json.dumps(
+        {"action": "consume_stock", "items": items},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        webhook_url.strip(),
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        log("warning", f"⚠️  Gagal update stok (HTTP {e.code}: {e.reason}). Cetak semua.")
+        return None
+    except urllib.error.URLError as e:
+        log("warning", f"⚠️  Gagal update stok (network: {e.reason}). Cetak semua.")
+        return None
+    except Exception as e:
+        log("warning", f"⚠️  Gagal update stok ({e}). Cetak semua.")
+        return None
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        log("warning", f"⚠️  Respons update stok bukan JSON: {body[:120]}")
+        return None
+
+    if data.get("status") != "ok":
+        log("warning", f"⚠️  Apps Script error update stok: {data.get('message','unknown')}")
+        return None
+
+    consumed = data.get("consumed")
+    if not isinstance(consumed, list):
+        log("warning", "⚠️  Field 'consumed' di respons bukan array.")
+        return None
+
+    return consumed
