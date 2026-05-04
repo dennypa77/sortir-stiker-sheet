@@ -219,6 +219,7 @@ def process_orders(
     progress_callback=None,          # fn(current, total)
     log_callback=None,               # fn(level, message)
     webhook_url: str = "",           # Apps Script Web App URL — kosong = skip sync
+    auto_deduct: bool = True,        # False = skip potong stok / LOG_KELUAR (cetak semua)
 ) -> dict:
     """
     Proses utama:
@@ -283,71 +284,83 @@ def process_orders(
     # Plan: untuk setiap pesanan tentukan from_stock (ambil dari gudang) +
     # to_print (cetak ulang). Kalau seluruh qty bisa diambil dari stok,
     # to_print=0 → file desain tidak diduplikasi sama sekali.
-    stock_map: dict[str, int] = {}
-    try:
-        stock_map = fetch_stock(webhook_url, log_callback)
-        check_stock_availability(stock_map, pesanan_list, log_callback)
-    except Exception as e:
-        log("warning", f"⚠️  Cek stok gagal tak terduga: {e}")
-
-    plan: list[dict] = []
-    working_stock = dict(stock_map)
-    for p in pesanan_list:
-        qty = p["qty"]
-        sku_key = p["sku"].strip().upper()
-        avail = working_stock.get(sku_key, 0)
-        from_stock = min(qty, avail) if avail > 0 else 0
-        if from_stock > 0:
-            working_stock[sku_key] = avail - from_stock
-        plan.append({
-            "pesanan":    p,
-            "from_stock": from_stock,
-            "to_print":   qty - from_stock,
-        })
-
-    # ── Konsumsi stok ke Apps Script (server-of-truth) ──────────────────────
-    items = []
-    plan_idx_for_item: list[int] = []
-    for i, entry in enumerate(plan):
-        if entry["from_stock"] > 0:
-            items.append({
-                "sku": entry["pesanan"]["sku"],
-                "qty": entry["from_stock"],
-                "ket": entry["pesanan"]["resi"],
-            })
-            plan_idx_for_item.append(i)
-
-    if items:
-        log("info", f"🏪 Mengambil {sum(it['qty'] for it in items)} pcs dari gudang "
-                    f"({len(items)} pesanan) — update DATABASE_STIKER + LOG_KELUAR...")
+    #
+    # Kalau auto_deduct=False, skip seluruh blok stok: semua qty di-print,
+    # tidak ada update DATABASE_STIKER / LOG_KELUAR.
+    if not auto_deduct:
+        log("info",
+            "⚙️  Auto Potong Stok: OFF — semua qty akan dicetak. "
+            "DATABASE_STIKER tidak dipotong, LOG_KELUAR tidak ditulis.")
+        plan: list[dict] = [
+            {"pesanan": p, "from_stock": 0, "to_print": p["qty"]}
+            for p in pesanan_list
+        ]
+    else:
+        stock_map: dict[str, int] = {}
         try:
-            results = consume_stock(webhook_url, items, log_callback)
+            stock_map = fetch_stock(webhook_url, log_callback)
+            check_stock_availability(stock_map, pesanan_list, log_callback)
         except Exception as e:
-            log("warning", f"⚠️  Update stok gagal tak terduga: {e}. Cetak semua.")
-            results = None
+            log("warning", f"⚠️  Cek stok gagal tak terduga: {e}")
 
-        if results is None:
-            # Total failure — fallback: cetak semua
-            for entry in plan:
-                entry["to_print"]   = entry["pesanan"]["qty"]
-                entry["from_stock"] = 0
-        else:
-            taken_total = 0
-            for idx_item, res in enumerate(results):
-                pidx  = plan_idx_for_item[idx_item]
-                entry = plan[pidx]
-                if res.get("ok"):
-                    taken_total += int(res.get("taken", 0))
-                else:
-                    # Server tolak (stok ternyata kurang / SKU tak ada) →
-                    # rollback ke "cetak semua qty" untuk pesanan ini.
-                    log("warning",
-                        f"⚠️  [{entry['pesanan']['sku']}] tidak bisa dipotong "
-                        f"({res.get('message','unknown')}) — cetak {entry['pesanan']['qty']} pcs.")
+        plan = []
+        working_stock = dict(stock_map)
+        for p in pesanan_list:
+            qty = p["qty"]
+            sku_key = p["sku"].strip().upper()
+            avail = working_stock.get(sku_key, 0)
+            from_stock = min(qty, avail) if avail > 0 else 0
+            if from_stock > 0:
+                working_stock[sku_key] = avail - from_stock
+            plan.append({
+                "pesanan":    p,
+                "from_stock": from_stock,
+                "to_print":   qty - from_stock,
+            })
+
+        # ── Konsumsi stok ke Apps Script (server-of-truth) ──────────────────
+        items = []
+        plan_idx_for_item: list[int] = []
+        for i, entry in enumerate(plan):
+            if entry["from_stock"] > 0:
+                items.append({
+                    "sku": entry["pesanan"]["sku"],
+                    "qty": entry["from_stock"],
+                    "ket": entry["pesanan"]["resi"],
+                })
+                plan_idx_for_item.append(i)
+
+        if items:
+            log("info", f"🏪 Mengambil {sum(it['qty'] for it in items)} pcs dari gudang "
+                        f"({len(items)} pesanan) — update DATABASE_STIKER + LOG_KELUAR...")
+            try:
+                results = consume_stock(webhook_url, items, log_callback)
+            except Exception as e:
+                log("warning", f"⚠️  Update stok gagal tak terduga: {e}. Cetak semua.")
+                results = None
+
+            if results is None:
+                # Total failure — fallback: cetak semua
+                for entry in plan:
                     entry["to_print"]   = entry["pesanan"]["qty"]
                     entry["from_stock"] = 0
-            if taken_total > 0:
-                log("success", f"✅ Stok terpotong {taken_total} pcs di DATABASE_STIKER + LOG_KELUAR.")
+            else:
+                taken_total = 0
+                for idx_item, res in enumerate(results):
+                    pidx  = plan_idx_for_item[idx_item]
+                    entry = plan[pidx]
+                    if res.get("ok"):
+                        taken_total += int(res.get("taken", 0))
+                    else:
+                        # Server tolak (stok ternyata kurang / SKU tak ada) →
+                        # rollback ke "cetak semua qty" untuk pesanan ini.
+                        log("warning",
+                            f"⚠️  [{entry['pesanan']['sku']}] tidak bisa dipotong "
+                            f"({res.get('message','unknown')}) — cetak {entry['pesanan']['qty']} pcs.")
+                        entry["to_print"]   = entry["pesanan"]["qty"]
+                        entry["from_stock"] = 0
+                if taken_total > 0:
+                    log("success", f"✅ Stok terpotong {taken_total} pcs di DATABASE_STIKER + LOG_KELUAR.")
 
     # ── Sync ke Google Sheet (sebelum copy, supaya log penjualan tetap masuk
     #    walau copy file gagal di tengah jalan) ──────────────────────────────

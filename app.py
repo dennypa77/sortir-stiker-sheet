@@ -84,8 +84,9 @@ class App(tk.Tk):
         self.mode_var      = tk.StringVar(value="normal")  # "normal" | "a3_round"
         self._processing   = False
 
-        # Scanner tab state
-        self.auto_deduct_var = tk.BooleanVar(value=False)
+        # Auto-deduct (dipakai oleh Eksekusi & Scanner tab — sumbernya satu)
+        # Default True: operator yg sehari-hari ingin stok auto terpotong saat sortir.
+        self.auto_deduct_var = tk.BooleanVar(value=True)
         self.scan_input      = tk.StringVar()
 
         # Update state
@@ -259,6 +260,32 @@ class App(tk.Tk):
             bg_sel    = MODE_A3_SEL,
             accent    = "#6c63ff",
         )
+
+        # Opsi: Auto Potong Stok (dicek default — sama seperti perilaku lama)
+        opt_frame = tk.Frame(parent, bg=BG_DARK, pady=10)
+        opt_frame.pack(fill="x")
+
+        cb_auto_deduct = tk.Checkbutton(
+            opt_frame,
+            text=" Auto Potong Stok  (potong DATABASE_STIKER + tulis LOG_KELUAR sebelum cetak)",
+            variable=self.auto_deduct_var,
+            font=("Segoe UI", 9, "bold"),
+            bg=BG_DARK, fg=ACCENT,
+            selectcolor=BG_INPUT,
+            activebackground=BG_DARK, activeforeground=ACCENT,
+            cursor="hand2",
+            command=self._on_auto_deduct_change,
+        )
+        cb_auto_deduct.pack(anchor="w", padx=4)
+
+        tk.Label(
+            opt_frame,
+            text=("Centang: SKU yang ada stoknya diambil dari gudang dulu, sisanya baru dicetak.   "
+                  "Kosongkan: cetak semua, gudang tidak disentuh."),
+            font=("Segoe UI", 8),
+            fg=MUTED_COLOR, bg=BG_DARK,
+            anchor="w", justify="left",
+        ).pack(anchor="w", padx=24, pady=(2, 0))
 
         # Progress
         prog_frame = tk.Frame(parent, bg=BG_DARK)
@@ -764,6 +791,7 @@ class App(tk.Tk):
                 progress_callback = self._update_progress,
                 log_callback      = self._log,
                 webhook_url       = webhook,
+                auto_deduct       = bool(self.auto_deduct_var.get()),
             )
         except Exception as e:
             self._log("error", f"❌ Error tidak terduga: {e}")
