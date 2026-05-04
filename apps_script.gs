@@ -275,6 +275,8 @@ function doGet(e) {
  * POST endpoint — dispatch by action.
  *   default / "sync_orders" → tulis pesanan ke DATA_SALES (B,C,D)
  *   "consume_stock"          → tulis ke LOG_KELUAR (B,C,D), validasi stok dulu
+ *   "lookup_resi"            → cari pesanan di DATA_SALES by No Resi, balas
+ *                              {items:[{sku,qty}], stock:{SKU:qty}}
  */
 function doPost(e) {
   try {
@@ -286,6 +288,9 @@ function doPost(e) {
 
     if (action === 'consume_stock') {
       return _consumeStockWebhook(body.items);
+    }
+    if (action === 'lookup_resi') {
+      return _lookupResiWebhook(body.resi);
     }
     return _syncOrdersWebhook(body.rows);
   } catch (err) {
@@ -433,6 +438,68 @@ function _consumeStockWebhook(items) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Cari pesanan di DATA_SALES berdasarkan No Resi (kolom B).
+ * Return semua row yang match → list {sku, qty}, plus stok saat ini
+ * untuk setiap SKU yang muncul (dibaca dari DATABASE_STIKER kolom G).
+ *
+ * Dipakai oleh fitur "Cek Stok Resi" di desktop app: operator scan barcode
+ * resi, app cari di sini, lalu tampilkan ketersediaan stok per SKU.
+ */
+function _lookupResiWebhook(resi) {
+  if (resi == null || String(resi).trim() === '') {
+    return _json({status: 'error', message: 'Field "resi" kosong'});
+  }
+  const targetResi = String(resi).trim();
+
+  const ss = getSS();
+  const salesSheet = ss.getSheetByName(SH_SALES);
+  if (!salesSheet) {
+    return _json({status: 'error', message: 'Tab "' + SH_SALES + '" tidak ditemukan'});
+  }
+
+  const lastRow = salesSheet.getLastRow();
+  if (lastRow < 2) {
+    return _json({status: 'ok', items: [], stock: {}, count: 0});
+  }
+
+  // B = No Resi, C = ID SKU, D = Qty
+  const data = salesSheet.getRange(2, 2, lastRow - 1, 3).getValues();
+
+  const items = [];
+  const skuKeys = {};
+  for (let i = 0; i < data.length; i++) {
+    const r = String(data[i][0] == null ? '' : data[i][0]).trim();
+    if (r !== targetResi) continue;
+    const sku = String(data[i][1] == null ? '' : data[i][1]).trim();
+    if (!sku) continue;
+    const qty = Number(data[i][2]) || 0;
+    items.push({sku: sku, qty: qty});
+    skuKeys[sku.toUpperCase()] = true;
+  }
+
+  // Lookup stok terkini hanya untuk SKU yg muncul di resi ini
+  const stock = {};
+  const dbSheet = ss.getSheetByName(SH_DATABASE);
+  if (dbSheet) {
+    const dbLast = dbSheet.getLastRow();
+    if (dbLast >= 2) {
+      const numRows = dbLast - 1;
+      const dbSkus = dbSheet.getRange(2, STOCK_SKU_COL, numRows, 1).getValues();
+      const dbQtys = dbSheet.getRange(2, STOCK_QTY_COL, numRows, 1).getValues();
+      for (let i = 0; i < numRows; i++) {
+        const k = String(dbSkus[i][0] == null ? '' : dbSkus[i][0]).trim().toUpperCase();
+        if (k && skuKeys[k]) {
+          const q = Number(dbQtys[i][0]);
+          stock[k] = isNaN(q) ? 0 : q;
+        }
+      }
+    }
+  }
+
+  return _json({status: 'ok', items: items, stock: stock, count: items.length});
 }
 
 function _json(obj) {

@@ -31,6 +31,7 @@ VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 PACKAGE_FILES = [
     "app.py",
     "file_processor.py",
+    "resi_checker.py",
     "sheets_sync.py",
     "stock_reader.py",
     "updater.py",
