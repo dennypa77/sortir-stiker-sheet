@@ -13,7 +13,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from file_processor import process_orders
-from resi_checker import lookup_resi
+from resi_checker import fetch_snapshot
 from updater import UpdateOrchestrator
 from version import __version__
 
@@ -88,6 +88,11 @@ class App(tk.Tk):
         # untuk session berjalan, tidak persistent.
         self.auto_deduct_var = tk.BooleanVar(value=True)
         self.scan_input      = tk.StringVar()
+
+        # Scanner cache — pre-fetch DATA_SALES + DATABASE_STIKER sekali,
+        # scan jadi lookup lokal O(1) tanpa HTTP per scan.
+        self._scan_cache         = None    # dict | None
+        self._scan_cache_loading = False
 
         # Update state
         self._active_orchestrator = None
@@ -878,15 +883,41 @@ class App(tk.Tk):
         tk.Label(
             info_panel,
             text=(
-                "Scan resi yang sudah dicetak. Sistem cari pesanan di "
-                "DATA_SALES, lalu cek\nstok setiap SKU di DATABASE_STIKER. "
-                "Tampilan ini READ-ONLY — gudang tidak\ndipotong di sini. "
-                "Untuk auto potong, gunakan tombol di tab Eksekusi."
+                "Tab READ-ONLY — pre-fetch DATA_SALES + DATABASE_STIKER sekali, "
+                "lalu setiap\nscan jadi lookup lokal (instan). Klik 🔄 Refresh "
+                "kalau data di sheet berubah\n(mis. setelah operator lain klik "
+                "Mulai Sortir)."
             ),
             font=("Segoe UI", 8),
             fg=TEXT_SECONDARY, bg=BG_PANEL,
             justify="left", anchor="w",
         ).pack(fill="x")
+
+        # Cache status + Refresh
+        cache_frame = tk.Frame(parent, bg=BG_DARK, pady=8)
+        cache_frame.pack(fill="x", padx=4)
+
+        self.cache_status_label = tk.Label(
+            cache_frame,
+            text="⏳  Cache belum dimuat — buka tab ini untuk auto-load.",
+            font=("Segoe UI", 8),
+            fg=MUTED_COLOR, bg=BG_DARK,
+            anchor="w",
+        )
+        self.cache_status_label.pack(side="left", fill="x", expand=True)
+
+        self.btn_cache_refresh = tk.Button(
+            cache_frame,
+            text="🔄  Refresh",
+            font=("Segoe UI", 8, "bold"),
+            bg=BTN_SECONDARY, fg=TEXT_PRIMARY,
+            activebackground=BTN_SEC_HOVER, activeforeground=TEXT_PRIMARY,
+            relief="flat", cursor="hand2",
+            padx=12, pady=4,
+            command=lambda: self._load_scan_cache(force=True),
+        )
+        self.btn_cache_refresh.pack(side="right")
+        self._bind_hover(self.btn_cache_refresh, BTN_SECONDARY, BTN_SEC_HOVER)
 
         # Scanner input panel
         scan_panel = tk.Frame(parent, bg=BG_PANEL, padx=22, pady=14)
@@ -987,6 +1018,9 @@ class App(tk.Tk):
                 self.scan_entry.focus_set()
             except Exception:
                 pass
+            # Auto-load cache pada kunjungan pertama (atau kalau gagal sebelumnya)
+            if self._scan_cache is None and not self._scan_cache_loading:
+                self._load_scan_cache(force=False)
 
     def _append_scan_text(self, level: str, message: str):
         self.scan_result_text.configure(state="normal")
@@ -1005,6 +1039,78 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    # ── Cache loader ──────────────────────────────────────────────────────────
+    def _load_scan_cache(self, force: bool = False):
+        """
+        Pre-fetch DATA_SALES + DATABASE_STIKER ke RAM. Setelah ini, setiap
+        scan resi jadi dict lookup O(1) tanpa HTTP.
+        """
+        if self._scan_cache_loading:
+            return  # Sedang load — abaikan trigger baru
+        if self._scan_cache is not None and not force:
+            return  # Sudah ada cache, bukan force-refresh
+
+        webhook = self.webhook_url.get().strip()
+        if not webhook:
+            self.cache_status_label.config(
+                text="❌  Webhook belum diset — buka tab ⚙ Konfigurasi.",
+                fg=ERROR_COLOR,
+            )
+            return
+
+        self._scan_cache_loading = True
+        self.cache_status_label.config(
+            text="⏳  Memuat snapshot DATA_SALES + DATABASE_STIKER...",
+            fg=INFO_COLOR,
+        )
+        self.btn_cache_refresh.config(state="disabled")
+
+        threading.Thread(
+            target=self._do_load_scan_cache,
+            args=(webhook,),
+            daemon=True,
+        ).start()
+
+    def _do_load_scan_cache(self, webhook: str):
+        logs: list[tuple[str, str]] = []
+
+        def cb(level, msg):
+            logs.append((level, msg))
+
+        snapshot = fetch_snapshot(webhook, log_callback=cb)
+        self.after(0, self._on_scan_cache_loaded, snapshot, logs)
+
+    def _on_scan_cache_loaded(self, snapshot, logs):
+        self._scan_cache_loading = False
+        self.btn_cache_refresh.config(state="normal")
+
+        if snapshot is None:
+            self._scan_cache = None
+            self.cache_status_label.config(
+                text="❌  Gagal memuat snapshot — klik 🔄 Refresh untuk coba lagi.",
+                fg=ERROR_COLOR,
+            )
+            # Tampilkan pesan error dari modul ke result area
+            for level, msg in logs:
+                if level in ("error", "warning"):
+                    self._append_scan_text(level, msg)
+            self._refocus_scan_entry()
+            return
+
+        self._scan_cache = snapshot
+        sales_count = snapshot["sales_count"]
+        stock_count = snapshot["stock_count"]
+        fetched_at  = snapshot["fetched_at"]
+        unique_resi = len(snapshot["by_resi"])
+        self.cache_status_label.config(
+            text=(f"✅  Snapshot dimuat — {sales_count} baris pesanan "
+                  f"({unique_resi} resi unik), {stock_count} SKU stok  "
+                  f"·  diambil {fetched_at}"),
+            fg=SUCCESS_COLOR,
+        )
+        self._refocus_scan_entry()
+
+    # ── Scan handler (lookup lokal) ───────────────────────────────────────────
     def _on_scan_submit(self):
         resi = self.scan_input.get().strip()
         # Clear segera supaya scanner berikutnya bisa langsung mengetik
@@ -1012,53 +1118,26 @@ class App(tk.Tk):
         if not resi:
             return
 
-        webhook = self.webhook_url.get().strip()
-        if not webhook:
-            self._append_scan_text(
-                "error",
-                "❌ Webhook Google Sheet belum dikonfigurasi. "
-                "Set di tab ⚙ Konfigurasi dulu."
-            )
-            self.scan_status.config(text="❌ Webhook belum diset",
-                                    fg=ERROR_COLOR)
+        if self._scan_cache is None:
+            if self._scan_cache_loading:
+                self.scan_status.config(
+                    text=f"⏳  Tunggu — snapshot sedang dimuat. "
+                         f"Resi '{resi}' akan dibuang.",
+                    fg=INFO_COLOR,
+                )
+            else:
+                self.scan_status.config(
+                    text="❌  Cache belum ada — klik 🔄 Refresh dulu.",
+                    fg=ERROR_COLOR,
+                )
             return
 
-        self.scan_status.config(text=f"⏳  Mencari resi {resi} ...",
-                                fg=INFO_COLOR)
-
-        threading.Thread(
-            target=self._do_scan_resi,
-            args=(webhook, resi),
-            daemon=True,
-        ).start()
-
-    def _do_scan_resi(self, webhook: str, resi: str):
-        """Worker thread: lookup_resi → kumpulkan ketersediaan stok per SKU."""
-        # Buffer log dari modul (resi_checker) supaya nyaru di scan_result_text,
-        # bukan ke log proses utama.
-        scan_logs: list[tuple[str, str]] = []
-
-        def cb(level, msg):
-            scan_logs.append((level, msg))
-
-        try:
-            data = lookup_resi(webhook, resi, log_callback=cb)
-        except Exception as e:
-            self.after(0, self._on_scan_done, resi, "error",
-                       [], scan_logs, str(e))
-            return
-
-        if data is None:
-            self.after(0, self._on_scan_done, resi, "error",
-                       [], scan_logs, "")
-            return
-
-        items = data.get("items") or []
-        stock = data.get("stock") or {}
+        # Lookup lokal — instan
+        items = self._scan_cache["by_resi"].get(resi, [])
+        stock = self._scan_cache["stock"]
 
         if not items:
-            self.after(0, self._on_scan_done, resi, "not_found",
-                       [], scan_logs, "")
+            self._render_scan_result(resi, "not_found", [])
             return
 
         rows: list[dict] = []
@@ -1082,49 +1161,32 @@ class App(tk.Tk):
                 "status": rstatus,
             })
 
-        self.after(0, self._on_scan_done, resi, "ok", rows, scan_logs, "")
+        self._render_scan_result(resi, "ok", rows)
 
-    def _on_scan_done(
-        self,
-        resi: str,
-        status: str,
-        rows: list,
-        scan_logs: list,
-        error_msg: str,
-    ):
+    def _render_scan_result(self, resi: str, status: str, rows: list):
         # Header per scan
         self._append_scan_text("muted", "")
         self._append_scan_text("header", f"📋  RESI: {resi}")
         self._append_scan_text("muted", "─" * 70)
 
-        if status == "error":
-            for level, msg in scan_logs:
-                self._append_scan_text(level, f"  {msg}")
-            if error_msg:
-                self._append_scan_text("error", f"  ❌ {error_msg}")
-            self.scan_status.config(text="❌  Lookup resi gagal",
-                                    fg=ERROR_COLOR)
-            self._refocus_scan_entry()
-            return
-
         if status == "not_found":
             self._append_scan_text(
                 "warning",
-                "  ⚠️  Resi tidak ditemukan di DATA_SALES."
+                "  ⚠️  Resi tidak ditemukan di snapshot DATA_SALES."
             )
             self._append_scan_text(
                 "muted",
-                "      (Pastikan operator sudah klik 'Mulai Sortir' "
-                "supaya DATA_SALES ter-update dulu.)"
+                "      (Pastikan operator sudah klik 'Mulai Sortir' supaya "
+                "DATA_SALES ter-update,\n      lalu klik 🔄 Refresh di tab ini.)"
             )
             self.scan_status.config(
-                text=f"⚠️  Resi {resi} tidak ada di DATA_SALES",
+                text=f"⚠️  Resi {resi} tidak ada di snapshot",
                 fg=WARNING_COLOR,
             )
             self._refocus_scan_entry()
             return
 
-        # status == "ok" → tampilkan tiap row (read-only display)
+        # status == "ok"
         ok_count = 0
         empty_count = 0
 
@@ -1158,12 +1220,6 @@ class App(tk.Tk):
                     f"  ⚠️  {sku}  butuh {qty}  →  STOK CUMA {avail}  [kurang]"
                 )
                 empty_count += 1
-
-        # Tampilkan warning/error dari modul (selain success/info redundant)
-        for level, msg in scan_logs:
-            if level in ("success", "info"):
-                continue
-            self._append_scan_text(level, f"      {msg}")
 
         summary = (f"✅ {ok_count} tersedia  |  {empty_count} kurang/kosong  |  "
                    f"{len(rows)} total SKU")

@@ -292,6 +292,9 @@ function doPost(e) {
     if (action === 'lookup_resi') {
       return _lookupResiWebhook(body.resi);
     }
+    if (action === 'bulk_snapshot') {
+      return _bulkSnapshotWebhook();
+    }
     return _syncOrdersWebhook(body.rows);
   } catch (err) {
     return _json({status: 'error', message: String(err)});
@@ -500,6 +503,71 @@ function _lookupResiWebhook(resi) {
   }
 
   return _json({status: 'ok', items: items, stock: stock, count: items.length});
+}
+
+/**
+ * Bulk snapshot — read DATA_SALES (B,C,D) + DATABASE_STIKER (A,G) sekali jalan.
+ *
+ * Dipakai oleh fitur "Cek Stok Resi" di desktop app: client tarik snapshot
+ * sekali saat tab dibuka / klik Refresh, lalu semua scan resi jadi lookup
+ * lokal O(1) tanpa HTTP roundtrip per scan.
+ *
+ * Response: {
+ *   status: 'ok',
+ *   sales: [{resi, sku, qty}, ...],     // semua baris non-kosong
+ *   stock: {SKU_UPPER: qty, ...},        // semua SKU di DATABASE_STIKER
+ *   sales_count, stock_count, timestamp
+ * }
+ */
+function _bulkSnapshotWebhook() {
+  const ss = getSS();
+
+  // ── DATA_SALES (B=Resi, C=SKU, D=Qty) ────────────────────────────────────
+  const sales = [];
+  const salesSheet = ss.getSheetByName(SH_SALES);
+  if (salesSheet) {
+    const lastRow = salesSheet.getLastRow();
+    if (lastRow >= 2) {
+      const data = salesSheet.getRange(2, 2, lastRow - 1, 3).getValues();
+      for (let i = 0; i < data.length; i++) {
+        const resi = String(data[i][0] == null ? '' : data[i][0]).trim();
+        if (!resi) continue;
+        const sku = String(data[i][1] == null ? '' : data[i][1]).trim();
+        if (!sku) continue;
+        const qty = Number(data[i][2]) || 0;
+        sales.push({resi: resi, sku: sku, qty: qty});
+      }
+    }
+  }
+
+  // ── DATABASE_STIKER (A=ID SKU, G=Stok Saat ini) ─────────────────────────
+  const stock = {};
+  let stockCount = 0;
+  const dbSheet = ss.getSheetByName(SH_DATABASE);
+  if (dbSheet) {
+    const dbLast = dbSheet.getLastRow();
+    if (dbLast >= 2) {
+      const numRows = dbLast - 1;
+      const dbSkus = dbSheet.getRange(2, STOCK_SKU_COL, numRows, 1).getValues();
+      const dbQtys = dbSheet.getRange(2, STOCK_QTY_COL, numRows, 1).getValues();
+      for (let i = 0; i < numRows; i++) {
+        const k = String(dbSkus[i][0] == null ? '' : dbSkus[i][0]).trim().toUpperCase();
+        if (!k) continue;
+        const q = Number(dbQtys[i][0]);
+        stock[k] = isNaN(q) ? 0 : q;
+        stockCount++;
+      }
+    }
+  }
+
+  return _json({
+    status: 'ok',
+    sales: sales,
+    stock: stock,
+    sales_count: sales.length,
+    stock_count: stockCount,
+    timestamp: Date.now(),
+  });
 }
 
 function _json(obj) {

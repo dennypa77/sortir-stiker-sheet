@@ -1,12 +1,20 @@
 """
 resi_checker.py
-Lookup pesanan berdasarkan No Resi via Apps Script.
+Lookup pesanan + snapshot DATA_SALES & DATABASE_STIKER via Apps Script.
 
 Endpoint Apps Script:
-  POST  action="lookup_resi"  body={"resi": "<no_resi>"}
+  POST  action="lookup_resi"   body={"resi": "<no_resi>"}
         → {"status":"ok",
            "items":[{"sku":..., "qty":...}, ...],
            "stock":{"SKU_UPPER": qty_int, ...}}
+  POST  action="bulk_snapshot" body={}
+        → {"status":"ok",
+           "sales":[{"resi":..., "sku":..., "qty":...}, ...],
+           "stock":{"SKU_UPPER": qty_int, ...},
+           "sales_count": int, "stock_count": int, "timestamp": ms}
+
+`fetch_snapshot` dipakai untuk pre-fetch sekali → cache lokal → scan O(1).
+`lookup_resi` dipertahankan untuk lookup ad-hoc / fallback.
 
 Kontrak log_callback sama dgn modul lain di project ini:
   log_callback(level, message)  level ∈ {"success","error","warning","info"}
@@ -15,6 +23,7 @@ Kontrak log_callback sama dgn modul lain di project ini:
 import json
 import urllib.error
 import urllib.request
+from datetime import datetime
 
 
 TIMEOUT_SECONDS = 30
@@ -110,3 +119,98 @@ def lookup_resi(webhook_url: str, resi: str, log_callback=None) -> dict | None:
                 stock[key] = 0
 
     return {"items": items, "stock": stock}
+
+
+def fetch_snapshot(webhook_url: str, log_callback=None) -> dict | None:
+    """
+    Bulk fetch DATA_SALES + DATABASE_STIKER dalam 1 request.
+
+    Dipakai untuk pre-fetch sekali (saat tab Cek Stok Resi dibuka /
+    klik Refresh) → cache lokal → semua scan resi jadi lookup dict
+    O(1) tanpa HTTP per scan.
+
+    Return dict atau None kalau gagal:
+        {
+            "by_resi":     {"<resi>": [{"sku","qty"}, ...]},  # index siap pakai
+            "stock":       {"SKU_UPPER": int},
+            "sales_count": int,                               # total baris di DATA_SALES
+            "stock_count": int,                               # total SKU di DATABASE_STIKER
+            "fetched_at":  "HH:MM:SS",                        # local time string
+        }
+    """
+    def log(level, msg):
+        if log_callback:
+            log_callback(level, msg)
+
+    if not webhook_url or not webhook_url.strip():
+        log("warning", "⚠️  Webhook Google Sheet belum dikonfigurasi.")
+        return None
+
+    payload = json.dumps({"action": "bulk_snapshot"}).encode("utf-8")
+    req = urllib.request.Request(
+        webhook_url.strip(),
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        log("error", f"❌ Gagal ambil snapshot (HTTP {e.code}: {e.reason}).")
+        return None
+    except urllib.error.URLError as e:
+        log("error", f"❌ Gagal ambil snapshot (network: {e.reason}).")
+        return None
+    except Exception as e:
+        log("error", f"❌ Gagal ambil snapshot ({e}).")
+        return None
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        log("error", f"❌ Respons snapshot bukan JSON: {body[:120]}")
+        return None
+
+    if data.get("status") != "ok":
+        log("error", f"❌ Apps Script error: {data.get('message','unknown')}")
+        return None
+
+    raw_sales = data.get("sales") or []
+    raw_stock = data.get("stock") or {}
+
+    # Build by_resi index — group baris DATA_SALES per resi
+    by_resi: dict[str, list[dict]] = {}
+    for row in raw_sales:
+        if not isinstance(row, dict):
+            continue
+        resi = str(row.get("resi", "")).strip()
+        sku  = str(row.get("sku", "")).strip()
+        if not resi or not sku:
+            continue
+        try:
+            qty = int(row.get("qty", 0))
+        except (ValueError, TypeError):
+            qty = 0
+        by_resi.setdefault(resi, []).append({"sku": sku, "qty": qty})
+
+    # Normalisasi stock
+    stock: dict[str, int] = {}
+    if isinstance(raw_stock, dict):
+        for k, v in raw_stock.items():
+            key = str(k).strip().upper()
+            if not key:
+                continue
+            try:
+                stock[key] = int(v)
+            except (ValueError, TypeError):
+                stock[key] = 0
+
+    return {
+        "by_resi":     by_resi,
+        "stock":       stock,
+        "sales_count": int(data.get("sales_count", len(raw_sales))),
+        "stock_count": int(data.get("stock_count", len(stock))),
+        "fetched_at":  datetime.now().strftime("%H:%M:%S"),
+    }
