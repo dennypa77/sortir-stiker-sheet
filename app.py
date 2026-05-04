@@ -14,7 +14,6 @@ from tkinter import filedialog, messagebox, ttk
 
 from file_processor import process_orders
 from resi_checker import lookup_resi
-from stock_reader import consume_stock
 from updater import UpdateOrchestrator
 from version import __version__
 
@@ -84,8 +83,9 @@ class App(tk.Tk):
         self.mode_var      = tk.StringVar(value="normal")  # "normal" | "a3_round"
         self._processing   = False
 
-        # Auto-deduct (dipakai oleh Eksekusi & Scanner tab — sumbernya satu)
-        # Default True: operator yg sehari-hari ingin stok auto terpotong saat sortir.
+        # Auto-deduct (dipakai oleh tombol di Eksekusi tab).
+        # SELALU True saat startup — tidak dibaca dari config. Toggle hanya
+        # untuk session berjalan, tidak persistent.
         self.auto_deduct_var = tk.BooleanVar(value=True)
         self.scan_input      = tk.StringVar()
 
@@ -274,7 +274,6 @@ class App(tk.Tk):
             selectcolor=BG_INPUT,
             activebackground=BG_DARK, activeforeground=ACCENT,
             cursor="hand2",
-            command=self._on_auto_deduct_change,
         )
         cb_auto_deduct.pack(anchor="w", padx=4)
 
@@ -585,8 +584,13 @@ class App(tk.Tk):
         if cfg.get("mode") in ("normal", "a3_round"):
             self.mode_var.set(cfg["mode"])
             self._refresh_mode_cards()
+        # auto_deduct sengaja TIDAK dibaca dari config — selalu mulai True setiap
+        # launch supaya operator default-nya potong stok. Kalau perlu off,
+        # operator klik checkbox di tab Eksekusi untuk session itu saja.
+        # Bersihkan key warisan v1.0.6/v1.0.7 yang bisa nyangkut sebagai False.
         if "auto_deduct" in cfg:
-            self.auto_deduct_var.set(bool(cfg["auto_deduct"]))
+            cfg.pop("auto_deduct", None)
+            save_config(cfg)
 
     def _save_paths(self):
         # Merge supaya field config lain (mis. last_known_version dari updater) tidak hilang.
@@ -874,32 +878,15 @@ class App(tk.Tk):
         tk.Label(
             info_panel,
             text=(
-                "Scan resi yang sudah dicetak. Sistem cari pesanan di DATA_SALES, "
-                "lalu cek stok\nsetiap SKU di DATABASE_STIKER. Jika 'Auto Potong "
-                "Stok' dicentang, qty yang\ntersedia langsung ditulis ke "
-                "LOG_KELUAR (kolom B/C/D)."
+                "Scan resi yang sudah dicetak. Sistem cari pesanan di "
+                "DATA_SALES, lalu cek\nstok setiap SKU di DATABASE_STIKER. "
+                "Tampilan ini READ-ONLY — gudang tidak\ndipotong di sini. "
+                "Untuk auto potong, gunakan tombol di tab Eksekusi."
             ),
             font=("Segoe UI", 8),
             fg=TEXT_SECONDARY, bg=BG_PANEL,
             justify="left", anchor="w",
         ).pack(fill="x")
-
-        # Checkbox: Auto Potong Stok
-        cb_outer = tk.Frame(parent, bg=BG_DARK, pady=8)
-        cb_outer.pack(fill="x")
-
-        cb = tk.Checkbutton(
-            cb_outer,
-            text=" Auto Potong Stok  (tulis LOG_KELUAR otomatis saat stok tersedia)",
-            variable=self.auto_deduct_var,
-            font=("Segoe UI", 9, "bold"),
-            bg=BG_DARK, fg=ACCENT,
-            selectcolor=BG_INPUT,
-            activebackground=BG_DARK, activeforeground=ACCENT,
-            cursor="hand2",
-            command=self._on_auto_deduct_change,
-        )
-        cb.pack(anchor="w", padx=4)
 
         # Scanner input panel
         scan_panel = tk.Frame(parent, bg=BG_PANEL, padx=22, pady=14)
@@ -1001,11 +988,6 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-    def _on_auto_deduct_change(self):
-        cfg = load_config()
-        cfg["auto_deduct"] = bool(self.auto_deduct_var.get())
-        save_config(cfg)
-
     def _append_scan_text(self, level: str, message: str):
         self.scan_result_text.configure(state="normal")
         self.scan_result_text.insert("end", message + "\n", level)
@@ -1041,20 +1023,19 @@ class App(tk.Tk):
                                     fg=ERROR_COLOR)
             return
 
-        auto_deduct = bool(self.auto_deduct_var.get())
         self.scan_status.config(text=f"⏳  Mencari resi {resi} ...",
                                 fg=INFO_COLOR)
 
         threading.Thread(
             target=self._do_scan_resi,
-            args=(webhook, resi, auto_deduct),
+            args=(webhook, resi),
             daemon=True,
         ).start()
 
-    def _do_scan_resi(self, webhook: str, resi: str, auto_deduct: bool):
-        """Worker thread: lookup_resi → optionally consume_stock."""
-        # Buffer log dari modul (resi_checker / stock_reader) supaya
-        # nyaru di scan_result_text, bukan ke log proses utama.
+    def _do_scan_resi(self, webhook: str, resi: str):
+        """Worker thread: lookup_resi → kumpulkan ketersediaan stok per SKU."""
+        # Buffer log dari modul (resi_checker) supaya nyaru di scan_result_text,
+        # bukan ke log proses utama.
         scan_logs: list[tuple[str, str]] = []
 
         def cb(level, msg):
@@ -1064,12 +1045,12 @@ class App(tk.Tk):
             data = lookup_resi(webhook, resi, log_callback=cb)
         except Exception as e:
             self.after(0, self._on_scan_done, resi, "error",
-                       [], False, scan_logs, str(e))
+                       [], scan_logs, str(e))
             return
 
         if data is None:
             self.after(0, self._on_scan_done, resi, "error",
-                       [], False, scan_logs, "")
+                       [], scan_logs, "")
             return
 
         items = data.get("items") or []
@@ -1077,81 +1058,37 @@ class App(tk.Tk):
 
         if not items:
             self.after(0, self._on_scan_done, resi, "not_found",
-                       [], False, scan_logs, "")
+                       [], scan_logs, "")
             return
 
-        # Bangun rows dgn rencana potong (per SKU)
         rows: list[dict] = []
-        deduct_items: list[dict] = []
         for it in items:
             sku = it["sku"]
             qty = it["qty"]
             avail = stock.get(sku.upper())
-            taken_planned = 0
             if avail is None:
                 rstatus = "no_db"
             elif avail <= 0:
                 rstatus = "empty"
             elif avail >= qty:
                 rstatus = "ok"
-                taken_planned = qty
             else:
                 rstatus = "partial"
-                taken_planned = avail
 
             rows.append({
-                "sku": sku,
-                "qty": qty,
-                "avail": avail,
+                "sku":    sku,
+                "qty":    qty,
+                "avail":  avail,
                 "status": rstatus,
-                "taken_planned": taken_planned,
-                "taken": 0,            # diisi setelah consume_stock
-                "deduct_index": None,  # diisi kalau item dikirim ke server
             })
 
-            if auto_deduct and taken_planned > 0:
-                rows[-1]["deduct_index"] = len(deduct_items)
-                deduct_items.append({
-                    "sku": sku,
-                    "qty": taken_planned,
-                    "ket": resi,
-                })
-
-        # Panggil consume_stock kalau perlu
-        if auto_deduct and deduct_items:
-            try:
-                consumed = consume_stock(webhook, deduct_items, log_callback=cb)
-            except Exception as e:
-                consumed = None
-                scan_logs.append(("error", f"❌ consume_stock error: {e}"))
-
-            if consumed is None:
-                # Total failure — tandai semua rencana gagal
-                for r in rows:
-                    if r["deduct_index"] is not None:
-                        r["status"] = "deduct_fail"
-            else:
-                for r in rows:
-                    di = r["deduct_index"]
-                    if di is None or di >= len(consumed):
-                        continue
-                    res = consumed[di]
-                    if res.get("ok"):
-                        r["taken"] = int(res.get("taken", r["taken_planned"]))
-                        r["sisa_after"] = res.get("sisa")
-                    else:
-                        r["status"] = "deduct_fail"
-                        r["fail_msg"] = res.get("message", "unknown")
-
-        self.after(0, self._on_scan_done, resi, "ok",
-                   rows, auto_deduct, scan_logs, "")
+        self.after(0, self._on_scan_done, resi, "ok", rows, scan_logs, "")
 
     def _on_scan_done(
         self,
         resi: str,
         status: str,
         rows: list,
-        auto_deduct: bool,
         scan_logs: list,
         error_msg: str,
     ):
@@ -1187,10 +1124,9 @@ class App(tk.Tk):
             self._refocus_scan_entry()
             return
 
-        # status == "ok" → tampilkan tiap row
+        # status == "ok" → tampilkan tiap row (read-only display)
         ok_count = 0
         empty_count = 0
-        deducted_total = 0
 
         for r in rows:
             sku = r["sku"]
@@ -1211,65 +1147,27 @@ class App(tk.Tk):
                 )
                 empty_count += 1
             elif rstatus == "ok":
-                if auto_deduct:
-                    sisa_after = r.get("sisa_after")
-                    if sisa_after is None:
-                        sisa_after = (avail or 0) - r["taken"]
-                    self._append_scan_text(
-                        "success",
-                        f"  ✅ {sku}  butuh {qty}  →  POTONG {r['taken']}  "
-                        f"(sisa setelah: {sisa_after})"
-                    )
-                    deducted_total += r["taken"]
-                else:
-                    self._append_scan_text(
-                        "success",
-                        f"  ✅ {sku}  butuh {qty}  →  STOK TERSEDIA {avail}  "
-                        f"[tidak dipotong — checkbox off]"
-                    )
+                self._append_scan_text(
+                    "success",
+                    f"  ✅ {sku}  butuh {qty}  →  STOK TERSEDIA {avail}"
+                )
                 ok_count += 1
             elif rstatus == "partial":
-                if auto_deduct:
-                    sisa_after = r.get("sisa_after")
-                    if sisa_after is None:
-                        sisa_after = (avail or 0) - r["taken"]
-                    self._append_scan_text(
-                        "warning",
-                        f"  ⚠️  {sku}  butuh {qty}  →  POTONG SEBAGIAN {r['taken']} "
-                        f"(stok cuma {avail}, sisa setelah: {sisa_after})"
-                    )
-                    deducted_total += r["taken"]
-                else:
-                    self._append_scan_text(
-                        "warning",
-                        f"  ⚠️  {sku}  butuh {qty}  →  STOK CUMA {avail}  "
-                        f"[tidak dipotong — checkbox off]"
-                    )
-                empty_count += 1
-            elif rstatus == "deduct_fail":
-                msg = r.get("fail_msg", "unknown")
                 self._append_scan_text(
-                    "error",
-                    f"  ❌ {sku}  butuh {qty}  →  GAGAL POTONG ({msg})"
+                    "warning",
+                    f"  ⚠️  {sku}  butuh {qty}  →  STOK CUMA {avail}  [kurang]"
                 )
                 empty_count += 1
 
-        # Tampilkan log dari modul (warning consume_stock dll)
+        # Tampilkan warning/error dari modul (selain success/info redundant)
         for level, msg in scan_logs:
-            # Skip success log konsume_stock yg redundant — info utama sudah di rows
             if level in ("success", "info"):
                 continue
             self._append_scan_text(level, f"      {msg}")
 
-        # Status bar bawah scan input
-        if auto_deduct and deducted_total > 0:
-            summary = (f"✅ {ok_count} OK  |  {empty_count} kurang  |  "
-                       f"📦 {deducted_total} pcs dipotong dari gudang")
-            color = SUCCESS_COLOR if empty_count == 0 else WARNING_COLOR
-        else:
-            summary = (f"✅ {ok_count} tersedia  |  {empty_count} kurang/kosong  |  "
-                       f"{len(rows)} total SKU")
-            color = SUCCESS_COLOR if empty_count == 0 else WARNING_COLOR
+        summary = (f"✅ {ok_count} tersedia  |  {empty_count} kurang/kosong  |  "
+                   f"{len(rows)} total SKU")
+        color = SUCCESS_COLOR if empty_count == 0 else WARNING_COLOR
         self.scan_status.config(text=summary, fg=color)
 
         self._refocus_scan_entry()
