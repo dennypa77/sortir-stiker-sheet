@@ -15,6 +15,7 @@ _test_updates/
 # User data
 Output/
 config.json
+production_log.json
 
 # Excel lock files
 ~$*.xlsx

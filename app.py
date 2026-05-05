@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 from file_processor import process_orders
@@ -18,7 +19,9 @@ from updater import UpdateOrchestrator
 from version import __version__
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+PROJECT_DIR         = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE         = os.path.join(PROJECT_DIR, "config.json")
+PRODUCTION_LOG_FILE = os.path.join(PROJECT_DIR, "production_log.json")
 
 
 def load_config() -> dict:
@@ -33,6 +36,23 @@ def save_config(data: dict):
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def load_production_log() -> list:
+    try:
+        with open(PRODUCTION_LOG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_production_log(entries: list):
+    try:
+        with open(PRODUCTION_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(entries, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -94,6 +114,11 @@ class App(tk.Tk):
         self._scan_cache         = None    # dict | None
         self._scan_cache_loading = False
 
+        # Daftar produksi — terisi otomatis dari hasil scan untuk SKU yang
+        # kosong / kurang / tidak ada di DATABASE_STIKER. Persist ke
+        # production_log.json supaya survive restart.
+        self._production_list = load_production_log()
+
         # Update state
         self._active_orchestrator = None
         self._restart_cancelled   = False
@@ -150,6 +175,32 @@ class App(tk.Tk):
             "Stiker.TNotebook.Tab",
             background = [("selected", BG_CARD), ("active", BTN_SEC_HOVER)],
             foreground = [("selected", TEXT_PRIMARY), ("active", TEXT_PRIMARY)],
+        )
+        style.configure(
+            "Stiker.Treeview",
+            background       = BG_INPUT,
+            foreground       = TEXT_PRIMARY,
+            fieldbackground  = BG_INPUT,
+            bordercolor      = BORDER_COLOR,
+            borderwidth      = 0,
+            rowheight        = 24,
+            font             = ("Segoe UI", 9),
+        )
+        style.configure(
+            "Stiker.Treeview.Heading",
+            background = BG_PANEL,
+            foreground = TEXT_SECONDARY,
+            relief     = "flat",
+            font       = ("Segoe UI", 8, "bold"),
+        )
+        style.map(
+            "Stiker.Treeview",
+            background = [("selected", ACCENT_GLOW)],
+            foreground = [("selected", TEXT_PRIMARY)],
+        )
+        style.map(
+            "Stiker.Treeview.Heading",
+            background = [("active", BTN_SEC_HOVER)],
         )
 
         self.progress_var = tk.DoubleVar(value=0)
@@ -952,20 +1003,39 @@ class App(tk.Tk):
         )
         self.scan_status.pack(fill="x", pady=(6, 0))
 
+        # Sub-notebook: Hasil Scan  /  Daftar Produksi
+        scan_subnotebook = ttk.Notebook(parent, style="Stiker.TNotebook")
+        scan_subnotebook.pack(fill="both", expand=True, pady=(10, 4))
+        self.scan_subnotebook = scan_subnotebook
+
+        tab_scan_result = tk.Frame(scan_subnotebook, bg=BG_DARK)
+        scan_subnotebook.add(tab_scan_result, text="  📋  Hasil Scan  ")
+        self._build_scan_result_subtab(tab_scan_result)
+
+        tab_produksi = tk.Frame(scan_subnotebook, bg=BG_DARK)
+        scan_subnotebook.add(tab_produksi, text="  🏭  Daftar Produksi  ")
+        self._production_tab_frame = tab_produksi
+        self._build_production_subtab(tab_produksi)
+
+        # Render data persist (kalau ada production_log.json) + update title
+        self._refresh_production_view()
+
+    # ── Sub-tab: Hasil Scan ───────────────────────────────────────────────────
+    def _build_scan_result_subtab(self, parent):
         # Header + tombol bersihkan
-        result_header = tk.Frame(parent, bg=BG_DARK, pady=8)
-        result_header.pack(fill="x")
+        header = tk.Frame(parent, bg=BG_DARK, pady=6)
+        header.pack(fill="x")
 
         tk.Label(
-            result_header,
-            text="HASIL SCAN",
-            font=("Segoe UI", 8, "bold"),
+            header,
+            text="Riwayat scan resi (sesi berjalan)",
+            font=("Segoe UI", 8),
             fg=MUTED_COLOR, bg=BG_DARK,
             anchor="w",
         ).pack(side="left")
 
         btn_clear_scan = tk.Button(
-            result_header,
+            header,
             text="Bersihkan",
             font=("Segoe UI", 8),
             bg=BTN_SECONDARY, fg=TEXT_SECONDARY,
@@ -980,7 +1050,7 @@ class App(tk.Tk):
         # Result text area
         result_box = tk.Frame(parent, bg=BG_INPUT, relief="flat",
                               highlightbackground=BORDER_COLOR, highlightthickness=1)
-        result_box.pack(fill="both", expand=True, pady=(0, 4))
+        result_box.pack(fill="both", expand=True, pady=(2, 0))
 
         self.scan_result_text = tk.Text(
             result_box,
@@ -1007,6 +1077,360 @@ class App(tk.Tk):
         self.scan_result_text.tag_configure("printed", foreground=TEXT_PRIMARY)
         self.scan_result_text.tag_configure(
             "header", foreground=ACCENT, font=("Consolas", 11, "bold"))
+
+    # ── Sub-tab: Daftar Produksi ──────────────────────────────────────────────
+    def _build_production_subtab(self, parent):
+        # Header: summary + tombol export & bersihkan
+        header = tk.Frame(parent, bg=BG_DARK, pady=6)
+        header.pack(fill="x")
+
+        self.production_summary_label = tk.Label(
+            header,
+            text="Belum ada SKU yang perlu diproduksi.",
+            font=("Segoe UI", 9, "bold"),
+            fg=INFO_COLOR, bg=BG_DARK,
+            anchor="w",
+        )
+        self.production_summary_label.pack(side="left")
+
+        btn_clear_prod = tk.Button(
+            header,
+            text="🗑  Bersihkan",
+            font=("Segoe UI", 8),
+            bg=BTN_SECONDARY, fg=TEXT_SECONDARY,
+            activebackground=BTN_SEC_HOVER, activeforeground=TEXT_PRIMARY,
+            relief="flat", cursor="hand2",
+            padx=10, pady=3,
+            command=self._clear_production_list,
+        )
+        btn_clear_prod.pack(side="right")
+        self._bind_hover(btn_clear_prod, BTN_SECONDARY, BTN_SEC_HOVER)
+
+        btn_export = tk.Button(
+            header,
+            text="📤  Export Excel",
+            font=("Segoe UI", 8, "bold"),
+            bg=ACCENT, fg="white",
+            activebackground=ACCENT_HOVER, activeforeground="white",
+            relief="flat", cursor="hand2",
+            padx=12, pady=3,
+            command=self._export_production_excel,
+        )
+        btn_export.pack(side="right", padx=(0, 6))
+        self._bind_hover(btn_export, ACCENT, ACCENT_HOVER)
+
+        # Treeview
+        tree_box = tk.Frame(parent, bg=BG_INPUT, relief="flat",
+                            highlightbackground=BORDER_COLOR, highlightthickness=1)
+        tree_box.pack(fill="both", expand=True, pady=(2, 0))
+
+        columns = ("tanggal", "resi", "sku", "butuh", "stok", "kurang", "status")
+        tree = ttk.Treeview(
+            tree_box,
+            columns=columns,
+            show="headings",
+            style="Stiker.Treeview",
+            selectmode="browse",
+        )
+
+        tree.heading("tanggal", text="Tanggal")
+        tree.heading("resi",    text="No Resi")
+        tree.heading("sku",     text="SKU")
+        tree.heading("butuh",   text="Butuh")
+        tree.heading("stok",    text="Stok")
+        tree.heading("kurang",  text="Kurang")
+        tree.heading("status",  text="Status")
+
+        tree.column("tanggal", width=110, anchor="w",  stretch=False)
+        tree.column("resi",    width=140, anchor="w",  stretch=False)
+        tree.column("sku",     width=200, anchor="w",  stretch=True)
+        tree.column("butuh",   width=60,  anchor="e",  stretch=False)
+        tree.column("stok",    width=60,  anchor="e",  stretch=False)
+        tree.column("kurang",  width=70,  anchor="e",  stretch=False)
+        tree.column("status",  width=110, anchor="w",  stretch=False)
+
+        # Tag warna per status
+        tree.tag_configure("kosong",       foreground=ERROR_COLOR)
+        tree.tag_configure("kurang",       foreground=WARNING_COLOR)
+        tree.tag_configure("tidak_ada_db", foreground=ERROR_COLOR)
+
+        tree_sb = tk.Scrollbar(tree_box, command=tree.yview,
+                               bg=BG_PANEL, troughcolor=BG_INPUT, width=12)
+        tree.configure(yscrollcommand=tree_sb.set)
+        tree_sb.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+
+        self.production_tree = tree
+
+        # Hint label di bawah
+        tk.Label(
+            parent,
+            text=(
+                "ℹ  SKU otomatis masuk daftar saat scan menemukan stok kosong, kurang, "
+                "atau tidak terdaftar di DATABASE_STIKER. "
+                "Daftar disimpan otomatis dan bertahan setelah aplikasi ditutup."
+            ),
+            font=("Segoe UI", 8),
+            fg=MUTED_COLOR, bg=BG_DARK,
+            anchor="w", justify="left", wraplength=820,
+        ).pack(fill="x", pady=(6, 0))
+
+    # ── Daftar Produksi: helpers ──────────────────────────────────────────────
+    _STATUS_LABEL = {
+        "kosong":       "Stok Kosong",
+        "kurang":       "Stok Kurang",
+        "tidak_ada_db": "Tidak ada di DB",
+    }
+
+    def _add_to_production_list(self, resi: str, rows: list):
+        """
+        Dipanggil setelah setiap scan sukses. `rows` punya struktur sama dgn
+        yang dibuat di _on_scan_submit: {sku, qty, avail, status} dengan
+        status ∈ {ok, partial, empty, no_db}.
+
+        Hanya entri non-ok yang ditambahkan. Skip duplikat (resi+sku sudah ada).
+        """
+        status_map = {
+            "empty":   "kosong",
+            "no_db":   "tidak_ada_db",
+            "partial": "kurang",
+        }
+
+        existing_keys = {(e["resi"], e["sku"].upper()) for e in self._production_list}
+        ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        added = 0
+        skipped = 0
+
+        for r in rows:
+            mapped = status_map.get(r["status"])
+            if mapped is None:
+                continue  # status "ok" — bukan untuk produksi
+
+            key = (resi, str(r["sku"]).upper())
+            if key in existing_keys:
+                skipped += 1
+                continue
+
+            qty_butuh = int(r.get("qty") or 0)
+            avail_raw = r.get("avail")
+            qty_tersedia = int(avail_raw) if isinstance(avail_raw, int) else 0
+            qty_kurang = max(qty_butuh - qty_tersedia, 0)
+            if qty_kurang <= 0:
+                # Defensive: kalau status partial tapi qty cukup, skip
+                continue
+
+            self._production_list.append({
+                "ts":           ts_now,
+                "resi":         resi,
+                "sku":          r["sku"],
+                "qty_butuh":    qty_butuh,
+                "qty_tersedia": qty_tersedia if isinstance(avail_raw, int) else None,
+                "qty_kurang":   qty_kurang,
+                "status":       mapped,
+            })
+            added += 1
+
+        if added > 0:
+            save_production_log(self._production_list)
+            self._refresh_production_view()
+
+        return added, skipped
+
+    def _refresh_production_view(self):
+        """Re-render Treeview + summary header dari self._production_list."""
+        if not hasattr(self, "production_tree"):
+            return
+
+        tree = self.production_tree
+        for item in tree.get_children():
+            tree.delete(item)
+
+        if not self._production_list:
+            self.production_summary_label.config(
+                text="Belum ada SKU yang perlu diproduksi.",
+                fg=INFO_COLOR,
+            )
+            self._update_production_tab_title(0)
+            return
+
+        for entry in self._production_list:
+            ts_short = entry["ts"][5:16]  # "MM-DD HH:MM"
+            tersedia = entry.get("qty_tersedia")
+            tersedia_disp = "-" if tersedia is None else str(tersedia)
+            tree.insert(
+                "", "end",
+                values=(
+                    ts_short,
+                    entry["resi"],
+                    entry["sku"],
+                    entry["qty_butuh"],
+                    tersedia_disp,
+                    entry["qty_kurang"],
+                    self._STATUS_LABEL.get(entry["status"], entry["status"]),
+                ),
+                tags=(entry["status"],),
+            )
+
+        # Summary
+        total_kurang = sum(e["qty_kurang"] for e in self._production_list)
+        unique_sku   = len({e["sku"].upper() for e in self._production_list})
+        unique_resi  = len({e["resi"] for e in self._production_list})
+        self.production_summary_label.config(
+            text=(f"🏭  {len(self._production_list)} entri  ·  "
+                  f"{unique_sku} SKU unik  ·  "
+                  f"{unique_resi} resi  ·  "
+                  f"total {total_kurang} pcs harus diproduksi"),
+            fg=WARNING_COLOR,
+        )
+        self._update_production_tab_title(len(self._production_list))
+
+    def _update_production_tab_title(self, count: int):
+        if not hasattr(self, "scan_subnotebook") or not hasattr(self, "_production_tab_frame"):
+            return
+        label = "  🏭  Daftar Produksi  " if count == 0 else f"  🏭  Daftar Produksi  ({count})  "
+        try:
+            self.scan_subnotebook.tab(self._production_tab_frame, text=label)
+        except Exception:
+            pass
+
+    def _clear_production_list(self):
+        if not self._production_list:
+            return
+        if not messagebox.askyesno(
+            "Bersihkan Daftar Produksi",
+            f"Hapus semua {len(self._production_list)} entri dari daftar produksi?\n\n"
+            "Pastikan sudah di-export ke Excel kalau perlu disimpan."
+        ):
+            return
+        self._production_list.clear()
+        save_production_log(self._production_list)
+        self._refresh_production_view()
+        try:
+            self.scan_entry.focus_set()
+        except Exception:
+            pass
+
+    def _export_production_excel(self):
+        if not self._production_list:
+            messagebox.showinfo(
+                "Daftar Kosong",
+                "Belum ada SKU di daftar produksi. Scan resi dulu untuk mengisi daftar."
+            )
+            return
+
+        default_name = f"daftar_produksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        path = filedialog.asksaveasfilename(
+            title="Simpan Daftar Produksi",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            self._write_production_excel(path)
+        except Exception as e:
+            messagebox.showerror("Gagal Export Excel", str(e))
+            return
+
+        if messagebox.askyesno(
+            "Export Berhasil",
+            f"Daftar produksi tersimpan:\n\n{path}\n\nBuka file sekarang?"
+        ):
+            try:
+                os.startfile(path)
+            except Exception as e:
+                messagebox.showerror("Gagal Membuka File", str(e))
+
+    def _write_production_excel(self, path: str):
+        """Tulis 2 sheet: Detail + Ringkasan_per_SKU."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+
+        # ── Sheet 1: Detail ───────────────────────────────────────────────────
+        ws = wb.active
+        ws.title = "Detail"
+
+        headers = ["No", "Tanggal Scan", "No Resi", "SKU",
+                   "Qty Butuh", "Stok Tersedia", "Qty Kurang", "Status"]
+        ws.append(headers)
+
+        for i, entry in enumerate(self._production_list, start=1):
+            tersedia = entry.get("qty_tersedia")
+            ws.append([
+                i,
+                entry["ts"],
+                entry["resi"],
+                entry["sku"],
+                entry["qty_butuh"],
+                tersedia if tersedia is not None else "-",
+                entry["qty_kurang"],
+                self._STATUS_LABEL.get(entry["status"], entry["status"]),
+            ])
+
+        self._format_excel_sheet(
+            ws,
+            widths=[5, 20, 18, 30, 11, 14, 11, 18],
+            n_rows=len(self._production_list),
+        )
+
+        # ── Sheet 2: Ringkasan per SKU ────────────────────────────────────────
+        ws2 = wb.create_sheet(title="Ringkasan_per_SKU")
+        ws2.append(["No", "SKU", "Total Qty Kurang", "Jumlah Resi", "Status Terakhir"])
+
+        # Aggregate
+        agg: dict[str, dict] = {}
+        for entry in self._production_list:
+            key = entry["sku"].upper()
+            if key not in agg:
+                agg[key] = {
+                    "sku":          entry["sku"],
+                    "total_kurang": 0,
+                    "resi_set":     set(),
+                    "status":       entry["status"],
+                }
+            agg[key]["total_kurang"] += entry["qty_kurang"]
+            agg[key]["resi_set"].add(entry["resi"])
+            agg[key]["status"] = entry["status"]
+
+        sorted_agg = sorted(agg.values(), key=lambda x: -x["total_kurang"])
+        for i, row in enumerate(sorted_agg, start=1):
+            ws2.append([
+                i,
+                row["sku"],
+                row["total_kurang"],
+                len(row["resi_set"]),
+                self._STATUS_LABEL.get(row["status"], row["status"]),
+            ])
+
+        self._format_excel_sheet(
+            ws2,
+            widths=[5, 30, 18, 14, 18],
+            n_rows=len(sorted_agg),
+        )
+
+        wb.save(path)
+
+    @staticmethod
+    def _format_excel_sheet(ws, widths: list, n_rows: int):
+        from openpyxl.styles import Alignment, Font, PatternFill
+
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="6C63FF", end_color="6C63FF", fill_type="solid")
+        center      = Alignment(horizontal="center", vertical="center")
+
+        for col_idx, width in enumerate(widths, start=1):
+            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
+            cell = ws.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = center
+
+        ws.row_dimensions[1].height = 22
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=len(widths)).column_letter}{n_rows + 1}"
 
     def _on_notebook_tab_change(self, _event=None):
         try:
@@ -1221,8 +1645,24 @@ class App(tk.Tk):
                 )
                 empty_count += 1
 
+        # Catat SKU bermasalah ke Daftar Produksi (skip duplikat resi+sku)
+        added, skipped = self._add_to_production_list(resi, rows)
+        prod_note = ""
+        if added > 0:
+            prod_note = f"  ·  +{added} ke Daftar Produksi"
+            self._append_scan_text(
+                "info",
+                f"  🏭  {added} SKU ditambahkan ke Daftar Produksi."
+            )
+        if skipped > 0:
+            prod_note += f"  ·  {skipped} sudah ada"
+            self._append_scan_text(
+                "muted",
+                f"      ({skipped} SKU sudah pernah dicatat — tidak diduplikasi.)"
+            )
+
         summary = (f"✅ {ok_count} tersedia  |  {empty_count} kurang/kosong  |  "
-                   f"{len(rows)} total SKU")
+                   f"{len(rows)} total SKU{prod_note}")
         color = SUCCESS_COLOR if empty_count == 0 else WARNING_COLOR
         self.scan_status.config(text=summary, fg=color)
 
